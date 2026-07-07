@@ -127,6 +127,17 @@ st.sidebar.title("🔧 Sistema Taller")
 menu_elegido = st.sidebar.radio("Ir a:", lista_opciones_menu, index=idx_defecto)
 st.session_state.navegacion = menu_elegido
 
+
+def cambiar_pagina(nueva_pagina):
+    st.session_state.navegacion = nueva_pagina
+    st.experimental_rerun()
+
+
+def avanzar_paso_ingreso(nuevo_paso):
+    st.session_state.paso_ingreso = nuevo_paso
+    st.experimental_rerun()
+
+
 def colorear_estados(val):
     if val in ['Inspección Inicial Completada', 'Mantenimiento Completado']: return 'color: #17a2b8; font-weight: bold;'
     if val in ['En Proceso de Inspección', 'Mantenimiento en Proceso', 'Checklist Salida en Proceso']: return 'color: #fd7e14; font-weight: bold;'
@@ -252,12 +263,12 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     st.session_state.paso_ingreso = "fallas_adicionales"
                 else:
                     st.session_state.paso_ingreso = "checklist"
-                st.session_state.navegacion = "🚜 Ingreso de Equipo (Guiado)"
+                cambiar_pagina("🚜 Ingreso de Equipo (Guiado)")
             else:
                 controles_hechos = conn.execute("SELECT COUNT(*) FROM controles_salida WHERE ingreso_id = ?", (id_retomar,)).fetchone()[0]
                 st.session_state.salida_ingreso_id = id_retomar
                 st.session_state.idx_control_salida = controles_hechos
-                st.session_state.navegacion = "✅ Entrega de Equipo (Salida)"
+                cambiar_pagina("✅ Entrega de Equipo (Salida)")
             pass
             
     st.markdown("---")
@@ -290,26 +301,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     st.session_state.hallazgos_extras_ok = False
                     conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?", (id_buscado,))
                     conn.commit()
-                    st.session_state.navegacion = "🛠️ Ejecución de Mantenimiento"
-                    pass
-
-            elif estado_actual == 'Mantenimiento en Proceso':
-                st.warning("🔄 Mantenimiento por la mitad.")
-                if st.button("▶️ Retomar Mantenimiento", use_container_width=True):
-                    df_tareas_db = pd.read_sql_query("SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC", conn)
-                    todas = [{'tipo': 'mantenimiento', 'tarea': t} for t in df_tareas_db['descripcion'].tolist()]
-                    
-                    df_malos = pd.read_sql_query(f"SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = {id_buscado} AND estado = 'Malo'", conn)
-                    for _, a in df_malos.iterrows():
-                        todas.append({'tipo': 'reparacion', 'tarea': f"[{a['tarea']}] {a['observaciones']}"})
-                        
-                    hechas = pd.read_sql_query(f"SELECT tarea FROM controles_mantenimiento WHERE ingreso_id = {id_buscado}", conn)['tarea'].tolist()
-                    st.session_state.mant_queue = [t for t in todas if t['tarea'] not in hechas]
-                    st.session_state.mant_idx = 0
-                    st.session_state.mant_ingreso_id = id_buscado
-                    st.session_state.hallazgos_extras_ok = False
-                    st.session_state.navegacion = "🛠️ Ejecución de Mantenimiento"
-                    pass
+                    cambiar_pagina("🛠️ Ejecución de Mantenimiento")
 
             elif estado_actual == 'Mantenimiento Completado':
                 st.success("✅ Mantenimiento finalizado técnico en taller. ¡Ya podés descargar el reporte para facturar!")
@@ -329,8 +321,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     conn.commit()
                     st.session_state.salida_ingreso_id = id_buscado
                     st.session_state.idx_control_salida = 0
-                    st.session_state.navegacion = "✅ Entrega de Equipo (Salida)"
-                    pass
+                    cambiar_pagina("✅ Entrega de Equipo (Salida)")
 
             elif estado_actual == 'Equipo Entregado':
                 st.success("🎉 Equipo entregado. Proceso finalizado en su totalidad.")
@@ -374,9 +365,8 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                                      (interno, horas, origen, mecanico, fecha_hoy, ahora_txt, "En Proceso de Inspección"))
                         conn.commit()
                         st.session_state.ultimo_ingreso_id = conn.cursor().execute("SELECT last_insert_rowid()").fetchone()[0]
-                        st.session_state.paso_ingreso = "checklist"
                         st.session_state.idx_control_actual = 0
-                        pass
+                        avanzar_paso_ingreso("checklist")
                     
     elif st.session_state.paso_ingreso == "checklist":
         idx = st.session_state.idx_control_actual
@@ -397,12 +387,12 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                     conn.execute("INSERT INTO controles_ingreso (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", (st.session_state.ultimo_ingreso_id, tarea_actual, estado, obs.strip()))
                     
                     if idx == len(lista_ingreso) - 1:
-                        st.session_state.paso_ingreso = "fallas_adicionales"
+                        avanzar_paso_ingreso("fallas_adicionales")
                     else:
                         st.session_state.idx_control_actual += 1
-                        
+                        st.experimental_rerun()
+                    
                     conn.commit()
-                    pass
                     
     elif st.session_state.paso_ingreso == "fallas_adicionales":
         st.subheader("⚠️ Fallas o Roturas Adicionales")
@@ -429,8 +419,7 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                 conn.commit()
                 st.session_state.paso_ingreso = "registro_inicial"
                 st.success("¡Checklist completo y fallas adicionales guardadas correctamente!")
-                st.session_state.navegacion = "📊 Tablero de Equipos"
-                pass
+                cambiar_pagina("📊 Tablero de Equipos")
 
     conn.close()
 
@@ -462,10 +451,9 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                         conn.commit()
                         pass
             st.markdown("---")
-            if st.button("⏸️ Pausar Tareas", use_container_width=True):
+            if st.button("⏸️ Pausar Tareas", use_container_width=True, key="btn_pausar_tareas"):
                 st.session_state.mant_queue = [] 
-                st.session_state.navegacion = "📊 Tablero de Equipos"
-                pass
+                cambiar_pagina("📊 Tablero de Equipos")
 
         if idx >= total:
             if not st.session_state.hallazgos_extras_ok:
@@ -499,11 +487,10 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                     use_container_width=True
                 )
                 
-                if st.button("Volver al Tablero de Equipos", use_container_width=True):
+                if st.button("Volver al Tablero de Equipos", use_container_width=True, key="btn_volver_tablero_equipos"):
                     st.session_state.mant_queue = []
                     st.session_state.hallazgos_extras_ok = False
-                    st.session_state.navegacion = "📊 Tablero de Equipos"
-                    pass
+                    cambiar_pagina("📊 Tablero de Equipos")
         else:
             item = cola[idx]
             st.progress((idx) / total)
@@ -559,10 +546,9 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                 use_container_width=True
             )
             
-            if st.button("Volver al Tablero", use_container_width=True):
+            if st.button("Volver al Tablero", use_container_width=True, key="btn_volver_tablero_entrega"):
                 st.session_state.salida_ingreso_id = None
-                st.session_state.navegacion = "📊 Tablero de Equipos"
-                pass
+                cambiar_pagina("📊 Tablero de Equipos")
         else:
             tarea_actual = lista_salida[idx]
             st.progress((idx) / len(lista_salida))
