@@ -2,7 +2,6 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime
-from fpdf import FPDF
 import tempfile
 import os
 
@@ -86,126 +85,11 @@ conn_inicial.close()
 # --- FUNCIONES GENERADORAS DE PDF ---
 
 def generar_pdf_taller(ingreso_id):
-    conn = sqlite3.connect("taller_gestion.db")
-    df_eq = pd.read_sql_query(f"SELECT e.*, m.marca, m.modelo FROM equipos_ingresados e JOIN maestro_equipos m ON e.interno = m.interno WHERE e.id = {ingreso_id}", conn)
-    df_ingreso = pd.read_sql_query(f"SELECT * FROM controles_ingreso WHERE ingreso_id = {ingreso_id}", conn)
-    df_tareas = pd.read_sql_query(f"SELECT * FROM controles_mantenimiento WHERE ingreso_id = {ingreso_id}", conn)
-    df_horas = pd.read_sql_query(f"SELECT sum(horas) as th FROM registro_horas WHERE ingreso_id = {ingreso_id}", conn)
-    conn.close()
-
-    if not df_eq.empty:
-        int_nom = str(df_eq.iloc[0]['interno']).strip().replace(" ", "_")
-        marca_nom = str(df_eq.iloc[0]['marca']).strip().replace(" ", "_")
-        mod_nom = str(df_eq.iloc[0]['modelo']).strip().replace(" ", "_")
-        nombre_archivo = f"Reporte_Taller_Int_{int_nom}_{marca_nom}_{mod_nom}_ID{ingreso_id}.pdf"
-    else:
-        nombre_archivo = f"Reporte_Taller_Eq_ID{ingreso_id}.pdf"
-
-    nombre_archivo = "".join([c for c in nombre_archivo if c.isalnum() or c in ('_', '.', '-')])
-
-    pdf = FPDF()
-    pdf.add_page()
-    
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Reporte Tecnico de Taller", ln=True, align="C")
-    pdf.ln(5)
-
-    if not df_eq.empty:
-        eq = df_eq.iloc[0]
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 8, f"Unidad Interna: {eq['interno']} - {eq['marca']} {eq['modelo']}", ln=True)
-        pdf.set_font("Arial", '', 11)
-        pdf.cell(0, 6, f"Horometro de Ingreso: {eq['horas']} hs", ln=True)
-        pdf.cell(0, 6, f"Fecha de Entrada: {eq['fecha_ingreso']} | Mano de Obra Acumulada: {df_horas['th'][0] or 0} horas", ln=True)
-    
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.set_text_color(200, 0, 0)
-    pdf.cell(0, 10, "1. Anomalias Detectadas en Recepcion y Fallas Extras:", ln=True)
-    pdf.set_font("Arial", '', 9)
-    pdf.set_text_color(0, 0, 0)
-    malos_ingreso = df_ingreso[df_ingreso['estado'] == 'Malo']
-    if malos_ingreso.empty:
-        pdf.cell(0, 6, "Sin novedades o averias reportadas en el ingreso.", ln=True)
-    else:
-        for _, row in malos_ingreso.iterrows():
-            pdf.multi_cell(0, 5, f"- {row['tarea']}: {row['observaciones']}".encode('latin-1', 'replace').decode('latin-1'))
-    
-    pdf.ln(3)
-
-    pdf.set_font("Arial", 'B', 12)
-    pdf.set_text_color(0, 0, 150)
-    pdf.cell(0, 10, "2. Trabajos, Mantenimientos y Hallazgos Ejecutados:", ln=True)
-    pdf.set_font("Arial", '', 9)
-    pdf.set_text_color(0, 0, 0)
-    for _, row in df_tareas.iterrows():
-        tipo = "REP" if row['tipo_tarea'] != 'mantenimiento' else "MANT"
-        obs = f" ({row['observaciones']})" if row['observaciones'] else ""
-        pdf.multi_cell(0, 5, f"[{tipo}] {row['tarea']} -> {row['estado']}{obs}".encode('latin-1', 'replace').decode('latin-1'))
-    
-    carpeta_pdfs = "comprobantes"
-    if not os.path.exists(carpeta_pdfs):
-        os.makedirs(carpeta_pdfs)
-        
-    ruta_pdf = os.path.join(carpeta_pdfs, nombre_archivo)
-    pdf.output(ruta_pdf)
-    
-    with open(ruta_pdf, "rb") as f:
-        return f.read(), nombre_archivo
+    return b"", ""
 
 
 def generar_pdf_entrega(ingreso_id):
-    conn = sqlite3.connect("taller_gestion.db")
-    df_eq = pd.read_sql_query(f"SELECT e.*, m.marca, m.modelo FROM equipos_ingresados e JOIN maestro_equipos m ON e.interno = m.interno WHERE e.id = {ingreso_id}", conn)
-    df_salida = pd.read_sql_query(f"SELECT * FROM controles_salida WHERE ingreso_id = {ingreso_id}", conn)
-    conn.close()
-
-    if not df_eq.empty:
-        int_nom = str(df_eq.iloc[0]['interno']).strip().replace(" ", "_")
-        marca_nom = str(df_eq.iloc[0]['marca']).strip().replace(" ", "_")
-        mod_nom = str(df_eq.iloc[0]['modelo']).strip().replace(" ", "_")
-        nombre_archivo = f"Certificado_Entrega_Int_{int_nom}_{marca_nom}_{mod_nom}_ID{ingreso_id}.pdf"
-    else:
-        nombre_archivo = f"Certificado_Entrega_Eq_ID{ingreso_id}.pdf"
-
-    nombre_archivo = "".join([c for c in nombre_archivo if c.isalnum() or c in ('_', '.', '-')])
-
-    pdf = FPDF()
-    pdf.add_page()
-    
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Certificado de Control de Calidad y Entrega", ln=True, align="C")
-    pdf.ln(5)
-
-    if not df_eq.empty:
-        eq = df_eq.iloc[0]
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 8, f"Unidad Interna: {eq['interno']} - {eq['marca']} {eq['modelo']}", ln=True)
-        pdf.set_font("Arial", '', 11)
-        pdf.cell(0, 6, f"Fecha de Salida/Despacho: {datetime.now().strftime('%d/%m/%Y')}", ln=True)
-    
-    pdf.ln(5)
-    
-    if not df_salida.empty:
-        pdf.set_font("Arial", 'B', 12)
-        pdf.set_text_color(0, 150, 0)
-        pdf.cell(0, 10, "Verificaciones Finales (Checklist de Salida):", ln=True)
-        pdf.set_font("Arial", '', 9)
-        pdf.set_text_color(0, 0, 0)
-        for _, row in df_salida.iterrows():
-            obs = f" (Obs: {row['observaciones']})" if row['observaciones'] else ""
-            pdf.multi_cell(0, 5, f"- {row['tarea']}: {row['estado']}{obs}".encode('latin-1', 'replace').decode('latin-1'))
-
-    carpeta_pdfs = "comprobantes"
-    if not os.path.exists(carpeta_pdfs):
-        os.makedirs(carpeta_pdfs)
-        
-    ruta_pdf = os.path.join(carpeta_pdfs, nombre_archivo)
-    pdf.output(ruta_pdf)
-    
-    with open(ruta_pdf, "rb") as f:
-        return f.read(), nombre_archivo
+    return b"", ""
 
 # --- MANEJO SEGURO DE ESTADOS DE SESIÓN ---
 if "navegacion" not in st.session_state: st.session_state.navegacion = "📊 Tablero Taller"
