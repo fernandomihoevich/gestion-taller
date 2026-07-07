@@ -280,7 +280,7 @@ if menu_elegido == "📊 Tablero Taller":
                     """, (titulo.strip(), descripcion.strip(), str(fecha_carga), str(fecha_entrega), prioridad, mecanico, "Pendiente", observaciones.strip()))
                     conn.commit()
                     st.success("Trabajo de taller registrado correctamente.")
-                    st.rerun()
+                    pass
                 else:
                     st.error("⚠️ El campo 'Título del Trabajo' es obligatorio.")
                     
@@ -325,7 +325,7 @@ if menu_elegido == "📊 Tablero Taller":
                             """, (edit_titulo.strip(), edit_desc.strip(), edit_prioridad, edit_mecanico, edit_fcarga.strip(), edit_fentrega.strip(), edit_estado, edit_obs.strip(), row['id']))
                             conn.commit()
                             st.success("Trabajo modificado correctamente.")
-                            st.rerun()
+                            pass
                     
                     c_status, c_del = st.columns(2)
                     with c_status:
@@ -333,12 +333,12 @@ if menu_elegido == "📊 Tablero Taller":
                             if st.button("✅ Marcar como Realizado", key=f"ok_taller_{row['id']}", use_container_width=True):
                                 cursor.execute("UPDATE pendientes_taller SET estado = 'Realizado' WHERE id = ?", (row['id'],))
                                 conn.commit()
-                                st.rerun()
+                                pass
                     with c_del:
                         if st.button("🗑️ Eliminar Trabajo", key=f"del_taller_{row['id']}", use_container_width=True):
                             cursor.execute("DELETE FROM pendientes_taller WHERE id = ?", (row['id'],))
                             conn.commit()
-                            st.rerun()
+                            pass
     conn.close()
 
 # ==========================================
@@ -374,7 +374,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 st.session_state.salida_ingreso_id = id_retomar
                 st.session_state.idx_control_salida = controles_hechos
                 st.session_state.navegacion = "✅ Entrega de Equipo (Salida)"
-            st.rerun()
+            pass
             
     st.markdown("---")
     
@@ -407,7 +407,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?", (id_buscado,))
                     conn.commit()
                     st.session_state.navegacion = "🛠️ Ejecución de Mantenimiento"
-                    st.rerun()
+                    pass
 
             elif estado_actual == 'Mantenimiento en Proceso':
                 st.warning("🔄 Mantenimiento por la mitad.")
@@ -425,7 +425,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     st.session_state.mant_ingreso_id = id_buscado
                     st.session_state.hallazgos_extras_ok = False
                     st.session_state.navegacion = "🛠️ Ejecución de Mantenimiento"
-                    st.rerun()
+                    pass
 
             elif estado_actual == 'Mantenimiento Completado':
                 st.success("✅ Mantenimiento finalizado técnico en taller. ¡Ya podés descargar el reporte para facturar!")
@@ -446,7 +446,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     st.session_state.salida_ingreso_id = id_buscado
                     st.session_state.idx_control_salida = 0
                     st.session_state.navegacion = "✅ Entrega de Equipo (Salida)"
-                    st.rerun()
+                    pass
 
             elif estado_actual == 'Equipo Entregado':
                 st.success("🎉 Equipo entregado. Proceso finalizado en su totalidad.")
@@ -492,13 +492,13 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                         st.session_state.ultimo_ingreso_id = conn.cursor().execute("SELECT last_insert_rowid()").fetchone()[0]
                         st.session_state.paso_ingreso = "checklist"
                         st.session_state.idx_control_actual = 0
-                        st.rerun()
+                        pass
                     
     elif st.session_state.paso_ingreso == "checklist":
         idx = st.session_state.idx_control_actual
         if idx >= len(lista_ingreso):
             st.session_state.paso_ingreso = "fallas_adicionales"
-            st.rerun()
+            pass
             
         tarea_actual = lista_ingreso[idx]
         st.subheader(f"Inspección: Control {idx+1} de {len(lista_ingreso)}")
@@ -518,7 +518,7 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                         st.session_state.idx_control_actual += 1
                         
                     conn.commit()
-                    st.rerun()
+                    pass
                     
     elif st.session_state.paso_ingreso == "fallas_adicionales":
         st.subheader("⚠️ Fallas o Roturas Adicionales")
@@ -546,7 +546,7 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                 st.session_state.paso_ingreso = "registro_inicial"
                 st.success("¡Checklist completo y fallas adicionales guardadas correctamente!")
                 st.session_state.navegacion = "📊 Tablero de Equipos"
-                st.rerun()
+                pass
 
     conn.close()
 
@@ -576,12 +576,12 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                     if st.form_submit_button("💾 Guardar Horas"):
                         conn.execute("INSERT INTO registro_horas (ingreso_id, fecha, horas, mecanico) VALUES (?, ?, ?, ?)", (ingreso_id, datetime.today().strftime("%d/%m/%Y"), h_input, mec_horas))
                         conn.commit()
-                        st.rerun()
+                        pass
             st.markdown("---")
             if st.button("⏸️ Pausar Tareas", use_container_width=True):
                 st.session_state.mant_queue = [] 
                 st.session_state.navegacion = "📊 Tablero de Equipos"
-                st.rerun()
+                pass
 
         if idx >= total:
             if not st.session_state.hallazgos_extras_ok:
@@ -602,7 +602,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                         conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?", (ingreso_id,))
                         conn.commit()
                         st.session_state.hallazgos_extras_ok = True
-                        st.rerun()
+                        pass
             else:
                 st.success("🎉 ¡Mantenimiento finalizado! El Reporte de Taller se guardó en el servidor.")
                 
@@ -619,7 +619,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                     st.session_state.mant_queue = []
                     st.session_state.hallazgos_extras_ok = False
                     st.session_state.navegacion = "📊 Tablero de Equipos"
-                    st.rerun()
+                    pass
         else:
             item = cola[idx]
             st.progress((idx) / total)
@@ -644,7 +644,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                             conn.execute("INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)", (ingreso_id, item['tarea'], accion, notas.strip(), item['tipo']))
                             conn.commit()
                         st.session_state.mant_idx += 1
-                        st.rerun()
+                        pass
         conn.close()
 
 # ==========================================
@@ -678,7 +678,7 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
             if st.button("Volver al Tablero", use_container_width=True):
                 st.session_state.salida_ingreso_id = None
                 st.session_state.navegacion = "📊 Tablero de Equipos"
-                st.rerun()
+                pass
         else:
             tarea_actual = lista_salida[idx]
             st.progress((idx) / len(lista_salida))
@@ -694,7 +694,7 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                         conn.execute("INSERT INTO controles_salida (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", (ingreso_id, tarea_actual, estado, obs.strip()))
                         conn.commit()
                         st.session_state.idx_control_salida += 1
-                        st.rerun()
+                        pass
     conn.close()
 
 # =========================================================
@@ -767,7 +767,7 @@ elif menu_elegido == "🛒 Lista de Compras":
                                      (rubro_sel, desc_input.strip(), det_input.strip(), cant_input.strip(), fecha_hoy, "Pendiente"))
                         conn.commit()
                         st.success("¡Agregado exitosamente a la lista de pendientes!")
-                        st.rerun()
+                        pass
                     else:
                         st.error("⚠️ Los campos 'Descripción' y 'Cantidad' son obligatorios.")
 
@@ -791,7 +791,7 @@ elif menu_elegido == "🛒 Lista de Compras":
                     if c4.button("✅ Ya lo compré", key=f"btn_compra_{fila['id']}"):
                         conn.execute("UPDATE lista_compras SET estado = 'Comprado' WHERE id = ?", (fila['id'],))
                         conn.commit()
-                        st.rerun()
+                        pass
                 st.markdown("---")
 
     with tab_rubros:
@@ -803,7 +803,7 @@ elif menu_elegido == "🛒 Lista de Compras":
                     conn.execute("INSERT INTO maestro_rubros_compras (nombre) VALUES (?)", (nuevo_rubro.strip(),))
                     conn.commit()
                     st.success("Rubro agregado correctamente.")
-                    st.rerun()
+                    pass
                     
         st.markdown("**Rubros Actuales:**")
         df_rubros_lista = pd.read_sql_query("SELECT * FROM maestro_rubros_compras ORDER BY nombre", conn)
@@ -813,7 +813,7 @@ elif menu_elegido == "🛒 Lista de Compras":
             if c2.button("🗑️ Eliminar", key=f"btn_delrub_{fila['id']}"):
                 conn.execute("DELETE FROM maestro_rubros_compras WHERE id = ?", (fila['id'],))
                 conn.commit()
-                st.rerun()
+                pass
 
     conn.close()
 
@@ -839,7 +839,7 @@ elif menu_elegido == "💼 Trabajos Clientes":
                                    (cliente.strip(), tarea.strip(), "Pendiente", str(fecha)))
                     conn.commit()
                     st.success("Trabajo registrado correctamente.")
-                    st.rerun()
+                    pass
                 else:
                     st.error("⚠️ Todos los campos son obligatorios.")
 
@@ -862,19 +862,19 @@ elif menu_elegido == "💼 Trabajos Clientes":
                                            (edit_cliente.strip(), edit_tarea.strip(), edit_fecha.strip(), row['id']))
                             conn.commit()
                             st.success("Registro modificado correctamente.")
-                            st.rerun()
+                            pass
                     
                     c_status, c_del = st.columns(2)
                     with c_status:
                         if st.button("✅ Marcar como Realizado", key=f"ok_{row['id']}", use_container_width=True):
                             cursor.execute("UPDATE trabajos_clientes SET estado = 'Realizado' WHERE id = ?", (row['id'],))
                             conn.commit()
-                            st.rerun()
+                            pass
                     with c_del:
                         if st.button("🗑️ Eliminar Registro", key=f"del_{row['id']}", use_container_width=True):
                             cursor.execute("DELETE FROM trabajos_clientes WHERE id = ?", (row['id'],))
                             conn.commit()
-                            st.rerun()
+                            pass
 
     conn.close()
 
@@ -893,7 +893,7 @@ elif menu_elegido == "⚙️ Configuración General":
             if st.form_submit_button(titulo_boton):
                 if nuevo_t:
                     conn.execute(f"INSERT INTO {tabla} (descripcion, orden) VALUES (?, ?)", (nuevo_t.strip(), nuevo_o))
-                    conn.commit(); st.rerun()
+                    conn.commit(); pass
                     
         df_list = pd.read_sql_query(f"SELECT * FROM {tabla} ORDER BY orden ASC", conn)
         for i, fila in df_list.iterrows():
@@ -903,15 +903,15 @@ elif menu_elegido == "⚙️ Configuración General":
                 fant = df_list.iloc[i - 1]
                 conn.execute(f"UPDATE {tabla} SET orden = ? WHERE id = ?", (fila['orden'], fant['id']))
                 conn.execute(f"UPDATE {tabla} SET orden = ? WHERE id = ?", (fant['orden'], fila['id']))
-                conn.commit(); st.rerun()
+                conn.commit(); pass
             if c3.button("⬇️", key=f"d_{tabla}_{fila['id']}") and i < len(df_list) - 1:
                 fsig = df_list.iloc[i + 1]
                 conn.execute(f"UPDATE {tabla} SET orden = ? WHERE id = ?", (fila['orden'], fsig['id']))
                 conn.execute(f"UPDATE {tabla} SET orden = ? WHERE id = ?", (fsig['orden'], fila['id']))
-                conn.commit(); st.rerun()
+                conn.commit(); pass
             if c4.button("🗑️ Quitar", key=f"del_{tabla}_{fila['id']}"):
                 conn.execute(f"DELETE FROM {tabla} WHERE id = ?", (fila['id'],))
-                conn.commit(); st.rerun()
+                conn.commit(); pass
 
     tab1, tab2, tab3 = st.tabs(["1️⃣ Checklist Ingreso", "2️⃣ Rutina Mantenimiento", "3️⃣ Checklist Salida"])
     
@@ -938,7 +938,7 @@ elif menu_elegido == "👥 Personal Mecánico":
         if st.form_submit_button("Registrar Técnico"):
             if nuevo_m:
                 conn.execute("INSERT INTO mecanicos (nombre) VALUES (?)", (nuevo_m.strip(),))
-                conn.commit(); st.success("Técnico dado de alta."); st.rerun()
+                conn.commit(); st.success("Técnico dado de alta."); pass
     st.subheader("Nómina Activa")
     st.dataframe(pd.read_sql_query("SELECT * FROM mecanicos", conn), use_container_width=True, hide_index=True)
     conn.close()
