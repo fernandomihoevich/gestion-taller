@@ -1,86 +1,31 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 from datetime import datetime
-import tempfile
 import os
+
+from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestión de Taller", layout="wide")
 
 # --- BASE DE DATOS Y ESTRUCTURA ---
-def conectar_db():
-    conn = sqlite3.connect("taller_gestion.db")
-    cursor = conn.cursor()
-    
-    # Creación de tablas operativas
-    cursor.execute("CREATE TABLE IF NOT EXISTS mecanicos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS pendientes_taller (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT NOT NULL, descripcion TEXT, fecha_carga TEXT, fecha_entrega TEXT, prioridad TEXT, mecanico TEXT, estado TEXT, observaciones TEXT)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS maestro_equipos (interno TEXT PRIMARY KEY, marca TEXT NOT NULL, modelo TEXT NOT NULL, tipo TEXT)")
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS equipos_ingresados (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, interno TEXT, horas INTEGER, origen TEXT,
-            mecanico TEXT, fecha_ingreso TEXT, hora_inicio TEXT, hora_fin TEXT, estado_proceso TEXT,
-            FOREIGN KEY(interno) REFERENCES maestro_equipos(interno)
-        )
-    """)
-    
-    # Historial de Controles y Ejecuciones
-    cursor.execute("CREATE TABLE IF NOT EXISTS controles_ingreso (id INTEGER PRIMARY KEY AUTOINCREMENT, ingreso_id INTEGER, tarea TEXT NOT NULL, estado TEXT NOT NULL, observaciones TEXT, FOREIGN KEY(ingreso_id) REFERENCES equipos_ingresados(id))")
-    cursor.execute("CREATE TABLE IF NOT EXISTS controles_mantenimiento (id INTEGER PRIMARY KEY AUTOINCREMENT, ingreso_id INTEGER, tarea TEXT NOT NULL, estado TEXT NOT NULL, observaciones TEXT, tipo_tarea TEXT, FOREIGN KEY(ingreso_id) REFERENCES equipos_ingresados(id))")
-    cursor.execute("CREATE TABLE IF NOT EXISTS controles_salida (id INTEGER PRIMARY KEY AUTOINCREMENT, ingreso_id INTEGER, tarea TEXT NOT NULL, estado TEXT NOT NULL, observaciones TEXT, FOREIGN KEY(ingreso_id) REFERENCES equipos_ingresados(id))")
-    cursor.execute("CREATE TABLE IF NOT EXISTS registro_horas (id INTEGER PRIMARY KEY AUTOINCREMENT, ingreso_id INTEGER, fecha TEXT NOT NULL, horas REAL NOT NULL, mecanico TEXT NOT NULL, FOREIGN KEY(ingreso_id) REFERENCES equipos_ingresados(id))")
-    
-    # MAESTROS CONFIGURABLES
-    cursor.execute("CREATE TABLE IF NOT EXISTS maestro_controles_ingreso (id INTEGER PRIMARY KEY AUTOINCREMENT, descripcion TEXT NOT NULL, orden INTEGER NOT NULL)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS maestro_tareas_mantenimiento (id INTEGER PRIMARY KEY AUTOINCREMENT, descripcion TEXT NOT NULL, orden INTEGER NOT NULL)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS maestro_controles_salida (id INTEGER PRIMARY KEY AUTOINCREMENT, descripcion TEXT NOT NULL, orden INTEGER NOT NULL)")
-    
-    # MÓDULO: COMPRAS
-    cursor.execute("CREATE TABLE IF NOT EXISTS maestro_rubros_compras (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS lista_compras (id INTEGER PRIMARY KEY AUTOINCREMENT, rubro TEXT NOT NULL, descripcion TEXT NOT NULL, detalle TEXT, cantidad TEXT NOT NULL, fecha_carga TEXT, estado TEXT NOT NULL)")
-
-    # MÓDULO: TRABAJOS CLIENTES
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trabajos_clientes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            cliente TEXT NOT NULL, 
-            tarea TEXT NOT NULL, 
-            estado TEXT NOT NULL, 
-            fecha_programada TEXT
-        )
-    """)
-
-    # Semillas iniciales
-    if cursor.execute("SELECT COUNT(*) FROM mecanicos").fetchone()[0] == 0:
-        cursor.executemany("INSERT INTO mecanicos (nombre) VALUES (?)", [("Cesar",), ("Lucas",), ("Marcelo",)])
-    
-    if cursor.execute("SELECT COUNT(*) FROM maestro_equipos").fetchone()[0] == 0:
-        flota_inicial = [("AE02", "TOYOTA", "628FD25", "Autoelevador"), ("AE05", "TOYOTA", "FD2025", "Autoelevador"), ("AE15", "HELI", "CPD25", "Eléctrico"), ("VY01", "YALE", "Propiedad Corven", "Autoelevador")]
-        cursor.executemany("INSERT OR IGNORE INTO maestro_equipos (interno, marca, modelo, tipo) VALUES (?, ?, ?, ?)", flota_inicial)
-
-    if cursor.execute("SELECT COUNT(*) FROM maestro_controles_ingreso").fetchone()[0] == 0:
-        iniciales = ["Visual estado equipo (estetico)", "Visual de perdidas de fluidos o roturas", "Funcionamiento luces delanteras", "Funcionamiento Luces traseras", "Luces perimetrales", "Luces freno", "Baliza de techo", "Sirena de retroceso", "Sensor hombre muerto", "Nivel aceite motor", "Nivel refrigerante motor", "Nivel aceite transmicion", "Nivel aceite hidráulico", "Nivel y estado liquido de frenos", "Estado de las uñas (rajaduras y torceduras)", "Estado de butaca", "Estado y funcionamiento HMS", "Estado de cubiertas", "Funcionamiento bocina", "Funcionamiento de pedal de acelerador", "Estado de resortes de los pedales", "Prueba frenos de servicio", "Prueba Freno de estacionamiento", "Control de pedales", "Funcionamiento de comandos hidráulicos", "Chequear instrumentos de tablero", "Chequear estado de mangueras y cadenas"]
-        cursor.executemany("INSERT INTO maestro_controles_ingreso (descripcion, orden) VALUES (?, ?)", [(t, i+1) for i, t in enumerate(iniciales)])
-
-    if cursor.execute("SELECT COUNT(*) FROM maestro_tareas_mantenimiento").fetchone()[0] == 0:
-        mant_imagen = ["Lavado Completo", "Retiro de uñas y parrilla", "Elevar y colocar tacos parte trasera", "Elevar y colocar tacos parte delantera", "Retiro ruedas delanteras", "Retirar aceite diferencial", "Retiro y desarme mazas delanteras", "Sopletear Frenos", "Controlar estado de patines de freno", "Lubricar regulador de frenos", "Controlar estado de campanas de freno", "Retirar retenes desarmar y lavar rodamientos", "Armar de mazas con retenes nuevos", "Colocar mazas delanteras", "Regular de patines de freno", "Regular Freno de mano", "Drenar liquido de frenos", "Retirar deposito de liquido de frenos para lavar", "Rearmar deposito controlando perdidas", "Controlar estado bulbo de frenos", "Rellenar y purgar frenos", "Reemplazar aceite y filtro motor", "Reemplazar filtro de aire", "Engrase general"]
-        cursor.executemany("INSERT INTO maestro_tareas_mantenimiento (descripcion, orden) VALUES (?, ?)", [(t, i+1) for i, t in enumerate(mant_imagen)])
-
-    if cursor.execute("SELECT COUNT(*) FROM maestro_controles_salida").fetchone()[0] == 0:
-        salida_imagen = ["Visual estado equipo (estetico)", "Visual de perdidas de fluidos o roturas", "Funcionamiento luces delanteras", "Funcionamiento Luces traseras", "Luces perimetrales", "Luces freno", "Baliza de techo", "Sirena de retroceso", "Sensor hombre muerto", "Nivel aceite motor", "Nivel refrigerante motor", "Nivel aceite transmicion", "Nivel aceite hidráulico", "Nivel y estado liquido de frenos", "Estado de butaca", "Estado y funcionamiento HMS", "Estado de cubiertas", "Funcionamiento bocina"]
-        cursor.executemany("INSERT INTO maestro_controles_salida (descripcion, orden) VALUES (?, ?)", [(t, i+1) for i, t in enumerate(salida_imagen)])
-        
-    if cursor.execute("SELECT COUNT(*) FROM maestro_rubros_compras").fetchone()[0] == 0:
-        rubros_inic = ["Ferretería", "Electricidad", "Pinturería", "Hierros", "Transporte / Logística", "Repuestos Específicos", "Insumos Generales"]
-        cursor.executemany("INSERT INTO maestro_rubros_compras (nombre) VALUES (?)", [(r,) for r in rubros_inic])
-
-    conn.commit()
-    return conn
-
+DB_PATH = ensure_database_file()
+ensure_remote_restore(DB_PATH)
 conn_inicial = conectar_db()
+inicializar_db(conn_inicial)
 conn_inicial.close()
+
+
+def persistir_y_sync():
+    """Genera respaldo local y sincroniza con Supabase tras cambios importantes."""
+    try:
+        crear_respaldo_db(DB_PATH)
+    except Exception:
+        pass
+    try:
+        sincronizar_supabase(DB_PATH)
+    except Exception:
+        pass
 
 # --- FUNCIONES GENERADORAS DE PDF ---
 
@@ -108,11 +53,12 @@ lista_opciones_menu = [
     "📊 Tablero Taller", 
     "📊 Tablero de Equipos",
     "💼 Trabajos Clientes",
+    "🛒 Lista de Compras",
     "🚜 Ingreso de Equipo (Guiado)",
     "🛠️ Ejecución de Mantenimiento", 
     "✅ Entrega de Equipo (Salida)",
     "🗂️ Archivo de PDFs",
-    "🛒 Lista de Compras",
+   
     "⚙️ Configuración General",
     "👥 Personal Mecánico",
     "📈 Reportes y Facturación"
@@ -130,12 +76,10 @@ st.session_state.navegacion = menu_elegido
 
 def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
-    st.experimental_rerun()
 
 
 def avanzar_paso_ingreso(nuevo_paso):
     st.session_state.paso_ingreso = nuevo_paso
-    st.experimental_rerun()
 
 
 def colorear_estados(val):
@@ -149,7 +93,7 @@ def colorear_estados(val):
 # ==========================================
 if menu_elegido == "📊 Tablero Taller":
     st.title("📊 Tablero Taller: Gestión de Trabajos Internos")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     cursor = conn.cursor()
     
     tab_panel, tab_cargar = st.tabs(["📋 Tablero de Trabajos", "➕ Cargar Nuevo Trabajo"])
@@ -174,6 +118,7 @@ if menu_elegido == "📊 Tablero Taller":
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, (titulo.strip(), descripcion.strip(), str(fecha_carga), str(fecha_entrega), prioridad, mecanico, "Pendiente", observaciones.strip()))
                     conn.commit()
+                    persistir_y_sync()
                     st.success("Trabajo de taller registrado correctamente.")
                     pass
                 else:
@@ -219,6 +164,7 @@ if menu_elegido == "📊 Tablero Taller":
                                 WHERE id = ?
                             """, (edit_titulo.strip(), edit_desc.strip(), edit_prioridad, edit_mecanico, edit_fcarga.strip(), edit_fentrega.strip(), edit_estado, edit_obs.strip(), row['id']))
                             conn.commit()
+                            persistir_y_sync()
                             st.success("Trabajo modificado correctamente.")
                             pass
                     
@@ -228,6 +174,7 @@ if menu_elegido == "📊 Tablero Taller":
                             if st.button("✅ Marcar como Realizado", key=f"ok_taller_{row['id']}", use_container_width=True):
                                 cursor.execute("UPDATE pendientes_taller SET estado = 'Realizado' WHERE id = ?", (row['id'],))
                                 conn.commit()
+                                persistir_y_sync()
                                 pass
                     with c_del:
                         if st.button("🗑️ Eliminar Trabajo", key=f"del_taller_{row['id']}", use_container_width=True):
@@ -241,7 +188,7 @@ if menu_elegido == "📊 Tablero Taller":
 # ==========================================
 elif menu_elegido == "📊 Tablero de Equipos":
     st.title("🚜 Estado General y Flujo Técnico")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     
     df_incompletos = pd.read_sql_query("SELECT id, interno, mecanico, estado_proceso FROM equipos_ingresados WHERE estado_proceso IN ('En Proceso de Inspección', 'Checklist Salida en Proceso')", conn)
     if not df_incompletos.empty:
@@ -340,30 +287,67 @@ elif menu_elegido == "📊 Tablero de Equipos":
 # ==========================================
 elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
     st.title("🚜 Recepción de Equipos y Diagnóstico")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     lista_ingreso = pd.read_sql_query("SELECT descripcion FROM maestro_controles_ingreso ORDER BY orden", conn)['descripcion'].tolist()
     
     if st.session_state.paso_ingreso == "registro_inicial":
         st.subheader("Paso 1: Datos de Recepción")
         df_maestro = pd.read_sql_query("SELECT * FROM maestro_equipos ORDER BY interno", conn)
         df_mec = pd.read_sql_query("SELECT nombre FROM mecanicos", conn)
-        if df_maestro.empty or df_mec.empty:
-            st.error("Por favor cargue mecánicos y equipos primero.")
+        if df_mec.empty:
+            st.error("Por favor cargue mecánicos primero.")
         else:
+            crear_equipo_nuevo = df_maestro.empty
+            if not df_maestro.empty:
+                opcion_equipo = st.radio(
+                    "¿Qué desea cargar?",
+                    ["Seleccionar equipo existente", "Crear nuevo equipo"],
+                    index=0
+                )
+                crear_equipo_nuevo = opcion_equipo == "Crear nuevo equipo"
+
             with st.form("alta_ingreso"):
-                interno = st.selectbox("Seleccione Número de Interno:", df_maestro['interno'].tolist())
+                if crear_equipo_nuevo:
+                    interno = st.text_input("Nuevo Número de Interno:")
+                    marca = st.text_input("Marca del Equipo:")
+                    modelo = st.text_input("Modelo del Equipo:")
+                    tipo = st.text_input("Tipo de Equipo:")
+                else:
+                    interno = st.selectbox("Seleccione Número de Interno:", df_maestro['interno'].tolist())
+                    marca = None
+                    modelo = None
+                    tipo = None
+
                 horas = st.number_input("Horómetro:", min_value=0, step=1)
                 origen = st.selectbox("Origen / Destino:", ["Cliente", "Unidad de Alquiler", "Flota Propia"])
                 mecanico = st.selectbox("Mecánico:", df_mec['nombre'].tolist())
+
                 if st.form_submit_button("Comenzar Inspección ➡️"):
+                    if crear_equipo_nuevo:
+                        if not interno.strip() or not marca.strip() or not modelo.strip() or not tipo.strip():
+                            st.error("Todos los datos del equipo son obligatorios para crear un nuevo equipo.")
+                        else:
+                            existe_equipo = conn.execute("SELECT 1 FROM maestro_equipos WHERE interno = ?", (interno.strip(),)).fetchone()
+                            if existe_equipo:
+                                st.error("Ya existe un equipo con ese interno. Use otro número o seleccione un equipo existente.")
+                            else:
+                                conn.execute(
+                                    "INSERT INTO maestro_equipos (interno, marca, modelo, tipo) VALUES (?, ?, ?, ?)",
+                                    (interno.strip(), marca.strip(), modelo.strip(), tipo.strip())
+                                )
+                                conn.commit()
+                                persistir_y_sync()
                     if not lista_ingreso:
                         st.error("No hay ítems configurados en el Checklist de Ingreso.")
                     else:
                         ahora_txt = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-                        conn.execute("INSERT INTO equipos_ingresados (interno, horas, origen, mecanico, fecha_ingreso, hora_inicio, estado_proceso) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                     (interno, horas, origen, mecanico, fecha_hoy, ahora_txt, "En Proceso de Inspección"))
+                        conn.execute(
+                            "INSERT INTO equipos_ingresados (interno, horas, origen, mecanico, fecha_ingreso, hora_inicio, estado_proceso) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                            (interno.strip(), horas, origen, mecanico, fecha_hoy, ahora_txt, "En Proceso de Inspección")
+                        )
                         conn.commit()
+                        persistir_y_sync()
                         st.session_state.ultimo_ingreso_id = conn.cursor().execute("SELECT last_insert_rowid()").fetchone()[0]
                         st.session_state.idx_control_actual = 0
                         avanzar_paso_ingreso("checklist")
@@ -390,7 +374,6 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                         avanzar_paso_ingreso("fallas_adicionales")
                     else:
                         st.session_state.idx_control_actual += 1
-                        st.experimental_rerun()
                     
                     conn.commit()
                     
@@ -431,7 +414,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
     if not st.session_state.mant_queue:
         st.info("No hay rutina activa. Iníciala desde el Tablero de Equipos.")
     else:
-        conn = sqlite3.connect("taller_gestion.db")
+        conn = conectar_db()
         idx = st.session_state.mant_idx
         cola = st.session_state.mant_queue
         total = len(cola)
@@ -523,7 +506,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
 # ==========================================
 elif menu_elegido == "✅ Entrega de Equipo (Salida)":
     st.title("✅ Control de Calidad y Entrega")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     lista_salida = pd.read_sql_query("SELECT descripcion FROM maestro_controles_salida ORDER BY orden", conn)['descripcion'].tolist()
     ingreso_id = st.session_state.salida_ingreso_id
     
@@ -613,7 +596,7 @@ elif menu_elegido == "🗂️ Archivo de PDFs":
 # ==========================================
 elif menu_elegido == "🛒 Lista de Compras":
     st.title("🛒 Gestión de Insumos y Repuestos")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     
     tab_pendientes, tab_cargar, tab_rubros = st.tabs(["📋 Lista de Pendientes", "📝 Cargar Necesidad", "⚙️ Configurar Rubros"])
     
@@ -692,7 +675,7 @@ elif menu_elegido == "🛒 Lista de Compras":
 # ==========================================
 elif menu_elegido == "💼 Trabajos Clientes":
     st.title("💼 Gestión de Trabajos en Clientes")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     cursor = conn.cursor()
 
     tab_panel, tab_cargar = st.tabs(["📋 Panel de Trabajos", "➕ Cargar Nuevo Trabajo"])
@@ -708,6 +691,7 @@ elif menu_elegido == "💼 Trabajos Clientes":
                     cursor.execute("INSERT INTO trabajos_clientes (cliente, tarea, estado, fecha_programada) VALUES (?, ?, ?, ?)", 
                                    (cliente.strip(), tarea.strip(), "Pendiente", str(fecha)))
                     conn.commit()
+                    persistir_y_sync()
                     st.success("Trabajo registrado correctamente.")
                     pass
                 else:
@@ -731,6 +715,7 @@ elif menu_elegido == "💼 Trabajos Clientes":
                             cursor.execute("UPDATE trabajos_clientes SET cliente = ?, tarea = ?, fecha_programada = ? WHERE id = ?", 
                                            (edit_cliente.strip(), edit_tarea.strip(), edit_fecha.strip(), row['id']))
                             conn.commit()
+                            persistir_y_sync()
                             st.success("Registro modificado correctamente.")
                             pass
                     
@@ -753,7 +738,7 @@ elif menu_elegido == "💼 Trabajos Clientes":
 # ==========================================
 elif menu_elegido == "⚙️ Configuración General":
     st.title("⚙️ Configurador de Listas de Tareas")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     
     def gestionar_lista(tabla, titulo_boton):
         with st.form(f"add_{tabla}"):
@@ -802,7 +787,7 @@ elif menu_elegido == "⚙️ Configuración General":
 # ==========================================
 elif menu_elegido == "👥 Personal Mecánico":
     st.title("👥 Personal Técnico del Taller")
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     with st.form("alta_mec"):
         nuevo_m = st.text_input("Nombre del nuevo operario mecánico:")
         if st.form_submit_button("Registrar Técnico"):
@@ -820,7 +805,7 @@ elif menu_elegido == "📈 Reportes y Facturación":
     st.title("📈 Reporte Mensual de Trabajos")
     st.write("Acá podés generar el detalle unificado de todos los trabajos terminados (Taller, Externos e Internos) para exportarlos a Excel y facilitar la facturación.")
     
-    conn = sqlite3.connect("taller_gestion.db")
+    conn = conectar_db()
     
     st.write("---")
     st.subheader("Seleccionar Período a Exportar")
