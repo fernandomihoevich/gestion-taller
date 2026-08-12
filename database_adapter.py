@@ -140,6 +140,25 @@ def _has_remote_db():
     return bool(_get_database_url())
 
 
+def _remote_db_is_empty(db_url=None):
+    """Comprueba si la base de datos remota tiene tablas en el schema public."""
+    psy = _import_psycopg2()
+    if psy is None:
+        return True
+    db_url = db_url or _get_database_url()
+    if not db_url:
+        return True
+    try:
+        conn = psy.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';")
+        count = cur.fetchone()[0]
+        conn.close()
+        return count == 0
+    except Exception:
+        return True
+
+
 def _local_db_is_empty(db_path):
     if not os.path.exists(db_path):
         return True
@@ -301,8 +320,35 @@ def conectar_db():
     """Conecta a Supabase PostgreSQL o SQLite local"""
     db_path = ensure_database_file()
 
-    if _has_remote_db() and _local_db_is_empty(db_path):
-        restaurar_desde_supabase(db_path)
+    # Si hay DB remota disponible, evaluar estado y sincronizar según corresponda
+    if _has_remote_db():
+        try:
+            db_url = _get_database_url()
+            psy = _import_psycopg2()
+            if psy and db_url:
+                remote_empty = _remote_db_is_empty(db_url)
+                local_empty = _local_db_is_empty(db_path)
+
+                # Caso 1: remoto vacío y local tiene datos -> inicializar y empujar local->remoto
+                if remote_empty and not local_empty:
+                    try:
+                        conn_pg = psy.connect(db_url)
+                        conn_pg.autocommit = False
+                        inicializar_db(conn_pg)
+                        conn_pg.commit()
+                        conn_pg.close()
+                        sincronizar_supabase(db_path)
+                    except Exception as exc:
+                        print(f"⚠️ No se pudo inicializar/sincronizar remoto: {exc}")
+
+                # Caso 2: remoto con datos y local vacío -> restaurar remoto->local
+                if not remote_empty and local_empty:
+                    try:
+                        restaurar_desde_supabase(db_path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     if _has_remote_db() and psycopg2 is not None:
         # Usar PostgreSQL en la nube cuando haya URL remota disponible
