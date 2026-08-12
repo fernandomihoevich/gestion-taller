@@ -3,12 +3,19 @@ import pandas as pd
 from datetime import datetime
 import os
 
-from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db
+from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db, has_remote_db, IS_CLOUD
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestión de Taller", layout="wide")
 
 # --- BASE DE DATOS Y ESTRUCTURA ---
+# En Streamlit Cloud el filesystem es efímero: requerimos DATABASE_URL para
+# persistencia. Si estamos en Cloud y no hay DB remota, bloqueamos para evitar
+# pérdida de datos hasta que el secreto `DATABASE_URL` sea configurado.
+if IS_CLOUD and not has_remote_db():
+    st.error("La app está desplegada en Streamlit Cloud y no hay base remota configurada. Configure 'DATABASE_URL' en los Secrets de la app para evitar pérdida de datos. Mientras tanto, las operaciones de escritura están deshabilitadas.")
+    st.stop()
+
 DB_PATH = ensure_database_file()
 ensure_remote_restore(DB_PATH)
 conn_inicial = conectar_db()

@@ -118,6 +118,22 @@ def _get_database_url():
     return None
 
 
+def has_remote_db():
+    """Indica si hay una base remota configurada y psycopg2 disponible."""
+    return _has_remote_db()
+
+
+def is_persistent_backend_available():
+    """Devuelve True si la app tiene un backend persistente disponible.
+
+    En entornos Cloud (Streamlit) esto requiere `DATABASE_URL` configurada.
+    Localmente, el filesystem se considera persistente.
+    """
+    if IS_CLOUD:
+        return _has_remote_db()
+    return True
+
+
 def _has_remote_db():
     if _import_psycopg2() is None:
         return False
