@@ -99,11 +99,89 @@ def crear_respaldo_db(db_path=None):
         print(f"⚠️ No se pudo crear el respaldo: {exc}")
         return None
 
+    # Si está configurado S3, intentar subir el respaldo automáticamente
+    s3_cfg = _get_s3_config()
+    if s3_cfg and os.path.exists(backup_path):
+        key = backup_path.replace("\\", "/")
+        # Use prefix si está definido
+        prefix = s3_cfg.get("S3_PREFIX") or ""
+        if prefix:
+            key = f"{prefix.rstrip('/')}/{os.path.basename(backup_path)}"
+        else:
+            key = os.path.basename(backup_path)
+
+        try:
+            uploaded = upload_file_to_s3(backup_path, s3_cfg.get("S3_BUCKET"), key,
+                                         aws_access_key_id=s3_cfg.get("AWS_ACCESS_KEY_ID"),
+                                         aws_secret_access_key=s3_cfg.get("AWS_SECRET_ACCESS_KEY"),
+                                         region=s3_cfg.get("AWS_REGION"))
+            if uploaded:
+                print(f"✅ Respaldo subido a S3: {s3_cfg.get('S3_BUCKET')}/{key}")
+            else:
+                print("⚠️ No se pudo subir el respaldo a S3")
+        except Exception as exc:
+            print(f"⚠️ Error subiendo respaldo a S3: {exc}")
+
     backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith("taller_gestion_") and f.endswith(".db")])
     while len(backups) > BACKUP_RETENTION:
         os.remove(os.path.join(BACKUP_DIR, backups[0]))
         backups = backups[1:]
     return backup_path
+
+
+def _get_s3_config():
+    """Lee configuración de S3 desde variables de entorno o `st.secrets`.
+    Devuelve un dict con keys: S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_PREFIX
+    """
+    cfg = {}
+    # Primero desde entorno
+    cfg['S3_BUCKET'] = os.environ.get('S3_BUCKET') or os.environ.get('TALLER_S3_BUCKET')
+    cfg['AWS_ACCESS_KEY_ID'] = os.environ.get('AWS_ACCESS_KEY_ID')
+    cfg['AWS_SECRET_ACCESS_KEY'] = os.environ.get('AWS_SECRET_ACCESS_KEY')
+    cfg['AWS_REGION'] = os.environ.get('AWS_REGION')
+    cfg['S3_PREFIX'] = os.environ.get('S3_PREFIX')
+
+    # Si hay streamlit secrets, permiten sobreescribir/alternativa
+    if st is not None:
+        try:
+            secrets = getattr(st, 'secrets', {}) or {}
+            cfg['S3_BUCKET'] = cfg['S3_BUCKET'] or secrets.get('S3_BUCKET')
+            cfg['AWS_ACCESS_KEY_ID'] = cfg['AWS_ACCESS_KEY_ID'] or secrets.get('AWS_ACCESS_KEY_ID')
+            cfg['AWS_SECRET_ACCESS_KEY'] = cfg['AWS_SECRET_ACCESS_KEY'] or secrets.get('AWS_SECRET_ACCESS_KEY')
+            cfg['AWS_REGION'] = cfg['AWS_REGION'] or secrets.get('AWS_REGION')
+            cfg['S3_PREFIX'] = cfg['S3_PREFIX'] or secrets.get('S3_PREFIX')
+        except Exception:
+            pass
+
+    # Requerimos al menos el bucket para considerar activa la subida
+    if not cfg.get('S3_BUCKET'):
+        return None
+    return cfg
+
+
+def upload_file_to_s3(file_path, bucket, key, aws_access_key_id=None, aws_secret_access_key=None, region=None):
+    """Sube un archivo a S3 usando boto3. Devuelve True si tuvo éxito."""
+    try:
+        import boto3
+    except Exception:
+        print("⚠️ boto3 no está instalado; no se puede subir a S3")
+        return False
+
+    session_kwargs = {}
+    if aws_access_key_id and aws_secret_access_key:
+        session_kwargs['aws_access_key_id'] = aws_access_key_id
+        session_kwargs['aws_secret_access_key'] = aws_secret_access_key
+    if region:
+        session_kwargs['region_name'] = region
+
+    try:
+        session = boto3.session.Session(**session_kwargs) if session_kwargs else boto3
+        s3 = session.client('s3') if hasattr(session, 'client') else boto3.client('s3')
+        s3.upload_file(file_path, bucket, key)
+        return True
+    except Exception as exc:
+        print(f"⚠️ Error subiendo a S3: {exc}")
+        return False
 
 
 def _get_database_url():

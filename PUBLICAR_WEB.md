@@ -8,7 +8,7 @@
 - Actualización instantánea con cada push
 
 ### Desventajas:
-- Sin base de datos persistente (se pierde cada deploy)
+- El filesystem local es temporal; no debe usarse para guardar datos
 - Límite de 1GB RAM
 
 ### Pasos:
@@ -32,40 +32,25 @@
 
 ---
 
-## 💾 OPCIÓN 2: Con Base de Datos Persistente (PostgreSQL + Render)
+## 💾 OPCIÓN 2: Con Base de Datos Persistente (Supabase Free)
 
 ### Ventajas:
 - Datos persisten entre actualizaciones
-- Mejor para producción
+- El plan Free de Supabase evita depender del filesystem temporal de Streamlit
+- No requiere AWS S3 ni un servidor adicional
 
 ### Pasos:
 
-1. **Crear base de datos en Render:**
-   - Ve a https://render.com
-   - New Database → PostgreSQL
-   - Copia la connection string
-
-2. **Crear archivo `database.py`:**
-   ```python
-   import psycopg2
-   import os
-   
-   def conectar_db():
-       DATABASE_URL = os.environ.get('DATABASE_URL')
-       conn = psycopg2.connect(DATABASE_URL)
-       # Replicar las tablas que tienes en SQLite
-       return conn
+1. En Supabase, abre tu proyecto Free y copia la conexión PostgreSQL.
+2. En Streamlit Cloud, abre la app → **Settings → Secrets**.
+3. Pega únicamente esta variable, usando la URL del pooler si la conexión directa falla:
+   ```toml
+   DATABASE_URL = "postgresql://postgres.TU_PROYECTO:TU_CONTRASENA@aws-0-REGION.pooler.supabase.com:6543/postgres"
    ```
+4. Guarda y pulsa **Reboot app**.
 
-3. **Actualizar `app.py`:**
-   - Cambiar de SQLite a PostgreSQL
-   - Importar `database.py`
-
-4. **Deploy a Render:**
-   - New → Web Service
-   - Conectar repo GitHub
-   - Environment: `DATABASE_URL` = tu connection string
-   - Publish
+La app usa PostgreSQL como fuente principal y bloquea el arranque si Streamlit
+Cloud no encuentra `DATABASE_URL`, para no escribir datos en almacenamiento temporal.
 
 ---
 
@@ -94,7 +79,7 @@ def cargar_db_desde_s3():
 → Streamlit Cloud (gratis, sin BD)
 
 ### Si necesitas **Datos Persistentes:**
-→ Render + PostgreSQL (~$12/mes)
+→ Streamlit Cloud + Supabase Free
 
 ### Si es **Aplicación Crítica:**
 → AWS/Azure/Google Cloud (~$20-100/mes)
