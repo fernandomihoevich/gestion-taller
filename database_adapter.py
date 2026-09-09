@@ -394,6 +394,33 @@ except Exception:
     pass
 
 
+class _PostgresCursorAdapter:
+    """Adapta placeholders SQLite al cursor de PostgreSQL."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, sql, parameters=()):
+        self._cursor.execute(sql.replace("?", "%s"), parameters)
+        return self
+
+    def executemany(self, sql, parameters):
+        self._cursor.executemany(sql.replace("?", "%s"), parameters)
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
 class _PostgresConnectionAdapter:
     """Expone la API execute() de SQLite sobre una conexión PostgreSQL."""
 
@@ -406,7 +433,7 @@ class _PostgresConnectionAdapter:
         return cursor
 
     def cursor(self, *args, **kwargs):
-        return self._connection.cursor(*args, **kwargs)
+        return _PostgresCursorAdapter(self._connection.cursor(*args, **kwargs))
 
     def commit(self):
         return self._connection.commit()
