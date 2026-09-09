@@ -394,6 +394,33 @@ except Exception:
     pass
 
 
+class _PostgresConnectionAdapter:
+    """Expone la API execute() de SQLite sobre una conexión PostgreSQL."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, sql, parameters=()):
+        cursor = self._connection.cursor()
+        cursor.execute(sql.replace("?", "%s"), parameters)
+        return cursor
+
+    def cursor(self, *args, **kwargs):
+        return self._connection.cursor(*args, **kwargs)
+
+    def commit(self):
+        return self._connection.commit()
+
+    def rollback(self):
+        return self._connection.rollback()
+
+    def close(self):
+        return self._connection.close()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
 def conectar_db():
     """Conecta a Supabase PostgreSQL o SQLite local"""
     db_path = ensure_database_file()
@@ -437,7 +464,7 @@ def conectar_db():
 
             conn = psycopg2.connect(db_url)
             conn.autocommit = False
-            return conn
+            return _PostgresConnectionAdapter(conn)
         except Exception as e:
             if st is not None:
                 st.error(f"❌ Error conectando a Supabase: {e}")
