@@ -8,6 +8,156 @@ from database_adapter import conectar_db, ensure_database_file, crear_respaldo_d
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestión de Taller", layout="wide")
 
+st.markdown("""
+<style>
+    :root {
+        --taller-ink: #18324b;
+        --taller-muted: #607386;
+        --taller-teal: #147d83;
+        --taller-orange: #e76f32;
+        --taller-line: #dce5eb;
+        --taller-surface: #ffffff;
+    }
+
+    .stApp {
+        background: #f4f7f8;
+    }
+
+    [data-testid="stHeader"] {
+        background: rgba(244, 247, 248, 0.92);
+    }
+
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #18324b 0%, #214d61 100%);
+        border-right: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p {
+        color: #eaf3f5;
+    }
+
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        color: #ffffff;
+        letter-spacing: 0;
+    }
+
+    [data-testid="stSidebar"] [role="radiogroup"] {
+        gap: 0.28rem;
+    }
+
+    [data-testid="stSidebar"] [role="radio"] {
+        border-radius: 8px;
+        padding: 0.42rem 0.55rem;
+        transition: background 160ms ease, transform 160ms ease;
+    }
+
+    [data-testid="stSidebar"] [role="radio"]:hover {
+        background: rgba(255, 255, 255, 0.10);
+        transform: translateX(2px);
+    }
+
+    [data-testid="stSidebar"] [role="radio"][aria-checked="true"] {
+        background: var(--taller-orange);
+        box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
+    }
+
+    .block-container {
+        max-width: 1420px;
+        padding-top: 2.2rem;
+        padding-bottom: 3rem;
+    }
+
+    h1, h2, h3 {
+        color: var(--taller-ink);
+        letter-spacing: 0;
+    }
+
+    h1 {
+        font-weight: 750;
+        margin-bottom: 0.35rem;
+    }
+
+    h2, h3 {
+        font-weight: 680;
+    }
+
+    [data-testid="stCaptionContainer"] {
+        color: var(--taller-muted);
+    }
+
+    [data-testid="stForm"],
+    [data-testid="stExpander"] {
+        background: var(--taller-surface);
+        border: 1px solid var(--taller-line);
+        border-radius: 10px;
+        box-shadow: 0 5px 18px rgba(24, 50, 75, 0.055);
+    }
+
+    [data-testid="stForm"] {
+        padding: 0.85rem 1rem 0.55rem;
+    }
+
+    [data-testid="stExpander"] details summary {
+        color: var(--taller-ink);
+        font-weight: 650;
+    }
+
+    .stButton > button,
+    .stDownloadButton > button,
+    [data-testid="stFormSubmitButton"] > button {
+        border-radius: 7px;
+        border: 1px solid #c8d5dc;
+        font-weight: 650;
+        min-height: 2.55rem;
+        transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+    }
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    [data-testid="stFormSubmitButton"] > button:hover {
+        border-color: var(--taller-teal);
+        box-shadow: 0 4px 12px rgba(20, 125, 131, 0.18);
+        transform: translateY(-1px);
+    }
+
+    [data-testid="stFormSubmitButton"] > button,
+    .stButton > button[kind="primary"] {
+        background: var(--taller-teal);
+        border-color: var(--taller-teal);
+        color: #ffffff;
+    }
+
+    .stTextInput input,
+    .stTextArea textarea,
+    .stNumberInput input,
+    [data-baseweb="select"] > div {
+        border-radius: 7px;
+        border-color: #c8d5dc;
+    }
+
+    [data-testid="stMetric"] {
+        background: var(--taller-surface);
+        border: 1px solid var(--taller-line);
+        border-radius: 10px;
+        padding: 0.8rem 1rem;
+    }
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--taller-line);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    hr {
+        border-color: var(--taller-line);
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- BASE DE DATOS Y ESTRUCTURA ---
 # En Streamlit Cloud el filesystem es efímero: requerimos DATABASE_URL para
 # persistencia. Si estamos en Cloud y no hay DB remota, bloqueamos para evitar
