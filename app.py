@@ -17,7 +17,8 @@ if IS_CLOUD and not has_remote_db():
     st.stop()
 
 DB_PATH = ensure_database_file()
-ensure_remote_restore(DB_PATH)
+if not IS_CLOUD:
+    ensure_remote_restore(DB_PATH)
 conn_inicial = conectar_db()
 inicializar_db(conn_inicial)
 conn_inicial.close()
@@ -25,6 +26,8 @@ conn_inicial.close()
 
 def persistir_y_sync():
     """Genera respaldo local y sincroniza con Supabase tras cambios importantes."""
+    if IS_CLOUD:
+        return
     try:
         crear_respaldo_db(DB_PATH)
     except Exception:

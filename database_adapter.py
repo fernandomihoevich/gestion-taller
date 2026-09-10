@@ -453,7 +453,7 @@ def conectar_db():
     db_path = ensure_database_file()
 
     # Si hay DB remota disponible, evaluar estado y sincronizar según corresponda
-    if _has_remote_db():
+    if not IS_CLOUD and _has_remote_db():
         try:
             db_url = _get_database_url()
             psy = _import_psycopg2()
