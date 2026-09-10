@@ -107,6 +107,8 @@ st.markdown("""
 
     h1 {
         font-weight: 750;
+        font-size: 2rem;
+        line-height: 1.15;
         margin-bottom: 0.35rem;
     }
 
