@@ -55,6 +55,12 @@ st.markdown("""
         transition: background 160ms ease, transform 160ms ease;
     }
 
+    [data-testid="stSidebar"] [role="radio"] p,
+    [data-testid="stSidebar"] [role="radio"] span,
+    [data-testid="stSidebar"] [role="radio"] label {
+        color: #eaf3f5 !important;
+    }
+
     [data-testid="stSidebar"] [role="radio"]:hover {
         background: rgba(255, 255, 255, 0.10);
         transform: translateX(2px);
