@@ -91,6 +91,20 @@ st.markdown("""
         font-weight: 680;
     }
 
+    section.main [data-testid="stMarkdownContainer"] p,
+    section.main [data-testid="stMarkdownContainer"] span,
+    section.main [data-testid="stCaptionContainer"] p {
+        color: var(--taller-ink) !important;
+    }
+
+    section.main [data-baseweb="tab"] {
+        color: var(--taller-ink) !important;
+    }
+
+    section.main [data-baseweb="tab"][aria-selected="true"] {
+        color: var(--taller-orange) !important;
+    }
+
     [data-testid="stCaptionContainer"] {
         color: var(--taller-muted);
     }
