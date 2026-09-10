@@ -11,20 +11,20 @@ st.set_page_config(page_title="Gestión de Taller", layout="wide")
 st.markdown("""
 <style>
     :root {
-        --taller-ink: #18324b;
-        --taller-muted: #607386;
+        --taller-ink: #e8f0f2;
+        --taller-muted: #b7c8cf;
         --taller-teal: #147d83;
         --taller-orange: #e76f32;
-        --taller-line: #dce5eb;
-        --taller-surface: #ffffff;
+        --taller-line: #2d4b5d;
+        --taller-surface: #173246;
     }
 
     .stApp {
-        background: #f4f7f8;
+        background: #0f1f2e;
     }
 
     [data-testid="stHeader"] {
-        background: rgba(244, 247, 248, 0.92);
+        background: rgba(15, 31, 46, 0.92);
     }
 
     [data-testid="stSidebar"] {

@@ -1,8 +1,8 @@
 [theme]
 primaryColor = "#FF6B35"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F2F6"
-textColor = "#262730"
+backgroundColor = "#0F1F2E"
+secondaryBackgroundColor = "#173246"
+textColor = "#E8F0F2"
 
 [client]
 showErrorDetails = true
