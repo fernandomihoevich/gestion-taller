@@ -71,6 +71,29 @@ st.markdown("""
         box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
     }
 
+    [data-testid="stSidebar"] .stButton > button {
+        justify-content: flex-start;
+        text-align: left;
+        background: transparent;
+        border-color: transparent;
+        color: #eaf3f5;
+        box-shadow: none;
+    }
+
+    [data-testid="stSidebar"] .stButton > button:hover {
+        background: rgba(255, 255, 255, 0.10);
+        border-color: transparent;
+        color: #ffffff;
+        transform: translateX(2px);
+    }
+
+    [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background: var(--taller-orange);
+        border-color: var(--taller-orange);
+        color: #ffffff;
+        box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
+    }
+
     .block-container {
         max-width: 1420px;
         padding-top: 2.2rem;
@@ -250,8 +273,18 @@ except ValueError:
     idx_defecto = 0
 
 st.sidebar.title("🔧 Sistema Taller")
-menu_elegido = st.sidebar.radio("Ir a:", lista_opciones_menu, index=idx_defecto)
-st.session_state.navegacion = menu_elegido
+st.sidebar.caption("Navegación principal")
+for opcion_menu in lista_opciones_menu:
+    es_seleccionada = st.session_state.navegacion == opcion_menu
+    if st.sidebar.button(
+        opcion_menu,
+        key=f"menu_{opcion_menu}",
+        use_container_width=True,
+        type="primary" if es_seleccionada else "secondary",
+    ):
+        st.session_state.navegacion = opcion_menu
+
+menu_elegido = st.session_state.navegacion
 
 
 def cambiar_pagina(nueva_pagina):
