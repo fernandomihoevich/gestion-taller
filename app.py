@@ -1114,8 +1114,8 @@ elif menu_elegido == "📈 Reportes y Facturación":
                 'EXTERNO: ' || cliente as Cliente,
                 'Servicio Técnico en Cliente' as Equipo,
                 tarea as Descripcion_Trabajo,
-                0.0 as 'Horas Mano de Obra',
-                '' as 'Repuestos / Insumos'
+                0.0 as "Horas Mano de Obra",
+                '' as "Repuestos / Insumos"
             FROM trabajos_clientes
             WHERE estado = 'Realizado'
         """
@@ -1128,8 +1128,8 @@ elif menu_elegido == "📈 Reportes y Facturación":
                 'INTERNO: Taller Propio' as Cliente,
                 titulo as Equipo,
                 descripcion as Descripcion_Trabajo,
-                0.0 as 'Horas Mano de Obra',
-                observaciones as 'Repuestos / Insumos'
+                0.0 as "Horas Mano de Obra",
+                observaciones as "Repuestos / Insumos"
             FROM pendientes_taller
             WHERE estado IN ('Realizado', 'Terminado')
         """
