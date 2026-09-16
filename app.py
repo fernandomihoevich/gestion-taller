@@ -557,13 +557,13 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                     else:
                         ahora_txt = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-                        conn.execute(
-                            "INSERT INTO equipos_ingresados (interno, horas, origen, mecanico, fecha_ingreso, hora_inicio, estado_proceso) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                        resultado_ingreso = conn.execute(
+                            "INSERT INTO equipos_ingresados (interno, horas, origen, mecanico, fecha_ingreso, hora_inicio, estado_proceso) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
                             (interno.strip(), horas, origen, mecanico, fecha_hoy, ahora_txt, "En Proceso de Inspección")
                         )
+                        st.session_state.ultimo_ingreso_id = resultado_ingreso.fetchone()[0]
                         conn.commit()
                         persistir_y_sync()
-                        st.session_state.ultimo_ingreso_id = conn.cursor().execute("SELECT last_insert_rowid()").fetchone()[0]
                         st.session_state.idx_control_actual = 0
                         avanzar_paso_ingreso("checklist")
                     
