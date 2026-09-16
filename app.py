@@ -435,7 +435,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
             
     st.markdown("---")
     
-    df_ingresos = pd.read_sql_query("SELECT e.id, e.interno, m.marca, m.modelo, e.horas, e.fecha_ingreso, e.estado_proceso FROM equipos_ingresados e JOIN maestro_equipos m ON e.interno = m.interno ORDER BY e.id DESC", conn)
+    df_ingresos = pd.read_sql_query("SELECT e.id, e.interno, m.marca, m.modelo, e.horas, e.origen, e.mecanico, e.fecha_ingreso, e.hora_inicio, e.estado_proceso FROM equipos_ingresados e JOIN maestro_equipos m ON e.interno = m.interno ORDER BY e.id DESC", conn)
     if df_ingresos.empty:
         st.info("No hay equipos ingresados en el sistema.")
     else:
