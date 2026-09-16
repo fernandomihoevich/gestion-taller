@@ -445,6 +445,50 @@ elif menu_elegido == "📊 Tablero de Equipos":
         
         if seleccion_mante:
             id_buscado = opciones_select[seleccion_mante]
+            ingreso_actual = df_ingresos[df_ingresos['id'] == id_buscado].iloc[0]
+
+            with st.expander("✏️ Editar datos del ingreso seleccionado"):
+                df_equipos_edicion = pd.read_sql_query("SELECT interno, marca, modelo, tipo FROM maestro_equipos ORDER BY interno", conn)
+                df_mecanicos_edicion = pd.read_sql_query("SELECT nombre FROM mecanicos ORDER BY nombre", conn)
+                opciones_equipos_edicion = {
+                    f"{row['interno']} - {row['marca']} {row['modelo']}": row['interno']
+                    for _, row in df_equipos_edicion.iterrows()
+                }
+                etiquetas_equipos = list(opciones_equipos_edicion.keys())
+                etiqueta_actual = next(
+                    (etiqueta for etiqueta, interno in opciones_equipos_edicion.items() if interno == ingreso_actual['interno']),
+                    etiquetas_equipos[0] if etiquetas_equipos else None,
+                )
+                lista_mecanicos_edicion = df_mecanicos_edicion['nombre'].tolist()
+                mecanico_actual = ingreso_actual['mecanico'] if ingreso_actual['mecanico'] in lista_mecanicos_edicion else (lista_mecanicos_edicion[0] if lista_mecanicos_edicion else "Sin asignar")
+
+                with st.form(f"form_editar_ingreso_{id_buscado}"):
+                    col_edicion_1, col_edicion_2 = st.columns(2)
+                    with col_edicion_1:
+                        equipo_editado = st.selectbox(
+                            "Equipo / Interno:",
+                            etiquetas_equipos if etiquetas_equipos else ["Sin equipos configurados"],
+                            index=etiquetas_equipos.index(etiqueta_actual) if etiqueta_actual in etiquetas_equipos else 0,
+                        )
+                        horas_editadas = st.number_input("Horómetro:", min_value=0, value=int(ingreso_actual['horas'] or 0), step=1)
+                        origen_editado = st.selectbox("Origen / Destino:", ["Cliente", "Unidad de Alquiler", "Flota Propia"], index=["Cliente", "Unidad de Alquiler", "Flota Propia"].index(ingreso_actual['origen']) if ingreso_actual['origen'] in ["Cliente", "Unidad de Alquiler", "Flota Propia"] else 0)
+                    with col_edicion_2:
+                        mecanico_editado = st.selectbox("Mecánico:", lista_mecanicos_edicion if lista_mecanicos_edicion else ["Sin asignar"], index=lista_mecanicos_edicion.index(mecanico_actual) if mecanico_actual in lista_mecanicos_edicion else 0)
+                        fecha_editada = st.text_input("Fecha de ingreso:", value=ingreso_actual['fecha_ingreso'] or "")
+                        hora_inicio_editada = st.text_input("Hora de inicio:", value=ingreso_actual.get('hora_inicio', '') if hasattr(ingreso_actual, 'get') else "")
+
+                    if st.form_submit_button("💾 Guardar correcciones"):
+                        if not etiquetas_equipos:
+                            st.error("No hay equipos configurados para asignar al ingreso.")
+                        else:
+                            conn.execute(
+                                "UPDATE equipos_ingresados SET interno = ?, horas = ?, origen = ?, mecanico = ?, fecha_ingreso = ?, hora_inicio = ? WHERE id = ?",
+                                (opciones_equipos_edicion[equipo_editado], horas_editadas, origen_editado, mecanico_editado, fecha_editada.strip(), hora_inicio_editada.strip(), id_buscado),
+                            )
+                            conn.commit()
+                            persistir_y_sync()
+                            st.success("Datos del ingreso corregidos correctamente.")
+
             estado_actual = df_ingresos[df_ingresos['id'] == id_buscado].iloc[0]['estado_proceso']
             
             if estado_actual == 'Inspección Inicial Completada':
