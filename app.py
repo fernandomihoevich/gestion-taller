@@ -1079,11 +1079,11 @@ elif menu_elegido == "📈 Reportes y Facturación":
         # 1. Equipos del Taller
         query_equipos = """
             SELECT 
-                e.fecha_ingreso as Fecha,
-                'TALLER: ' || e.origen as Cliente,
-                m.marca || ' ' || m.modelo || ' (Int: ' || e.interno || ')' as Equipo,
-                'Mantenimiento / Reparación de Unidad en Taller' as Descripcion_Trabajo,
-                e.id as ingreso_id
+                e.fecha_ingreso as "Fecha",
+                'TALLER: ' || e.origen as "Cliente",
+                m.marca || ' ' || m.modelo || ' (Int: ' || e.interno || ')' as "Equipo",
+                'Mantenimiento / Reparación de Unidad en Taller' as "Descripcion_Trabajo",
+                e.id as "ingreso_id"
             FROM equipos_ingresados e
             JOIN maestro_equipos m ON e.interno = m.interno
             WHERE e.estado_proceso IN ('Mantenimiento Completado', 'Checklist Salida en Proceso', 'Equipo Entregado')
@@ -1110,10 +1110,10 @@ elif menu_elegido == "📈 Reportes y Facturación":
         # 2. Trabajos Externos en Clientes
         query_clientes = """
             SELECT 
-                fecha_programada as Fecha,
-                'EXTERNO: ' || cliente as Cliente,
-                'Servicio Técnico en Cliente' as Equipo,
-                tarea as Descripcion_Trabajo,
+                fecha_programada as "Fecha",
+                'EXTERNO: ' || cliente as "Cliente",
+                'Servicio Técnico en Cliente' as "Equipo",
+                tarea as "Descripcion_Trabajo",
                 0.0 as "Horas Mano de Obra",
                 '' as "Repuestos / Insumos"
             FROM trabajos_clientes
@@ -1124,10 +1124,10 @@ elif menu_elegido == "📈 Reportes y Facturación":
         # 3. Trabajos Internos
         query_internos = """
             SELECT 
-                fecha_entrega as Fecha,
-                'INTERNO: Taller Propio' as Cliente,
-                titulo as Equipo,
-                descripcion as Descripcion_Trabajo,
+                fecha_entrega as "Fecha",
+                'INTERNO: Taller Propio' as "Cliente",
+                titulo as "Equipo",
+                descripcion as "Descripcion_Trabajo",
                 0.0 as "Horas Mano de Obra",
                 observaciones as "Repuestos / Insumos"
             FROM pendientes_taller
