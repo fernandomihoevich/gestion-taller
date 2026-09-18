@@ -432,6 +432,32 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 st.session_state.idx_control_salida = controles_hechos
                 cambiar_pagina("✅ Entrega de Equipo (Salida)")
             pass
+
+    with st.expander("➕ Crear equipo nuevo"):
+        st.caption("Registrá el equipo antes de generar un ingreso o para corregir un ingreso existente.")
+        with st.form("form_crear_equipo_tablero"):
+            col_equipo_1, col_equipo_2 = st.columns(2)
+            with col_equipo_1:
+                nuevo_interno = st.text_input("Número de interno:")
+                nueva_marca = st.text_input("Marca:")
+            with col_equipo_2:
+                nuevo_modelo = st.text_input("Modelo:")
+                nuevo_tipo = st.text_input("Tipo de equipo:")
+
+            if st.form_submit_button("💾 Guardar equipo"):
+                datos_equipo = [nuevo_interno.strip(), nueva_marca.strip(), nuevo_modelo.strip(), nuevo_tipo.strip()]
+                if not all(datos_equipo):
+                    st.error("Completá todos los datos del equipo.")
+                elif conn.execute("SELECT 1 FROM maestro_equipos WHERE interno = ?", (datos_equipo[0],)).fetchone():
+                    st.error("Ya existe un equipo con ese número de interno.")
+                else:
+                    conn.execute(
+                        "INSERT INTO maestro_equipos (interno, marca, modelo, tipo) VALUES (?, ?, ?, ?)",
+                        tuple(datos_equipo),
+                    )
+                    conn.commit()
+                    persistir_y_sync()
+                    st.success("Equipo creado correctamente. Ya podés seleccionarlo al editar un ingreso.")
             
     st.markdown("---")
     
