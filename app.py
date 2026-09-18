@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from email.message import EmailMessage
 import os
+import smtplib
 
 from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db, has_remote_db, IS_CLOUD
 
@@ -240,6 +242,42 @@ def generar_pdf_taller(ingreso_id):
 
 def generar_pdf_entrega(ingreso_id):
     return b"", ""
+
+
+def enviar_pdf_por_email(datos_pdf, nombre_archivo, asunto):
+    """Envía un PDF al destinatario configurado en Streamlit Secrets."""
+    try:
+        smtp_host = st.secrets.get("SMTP_HOST")
+        smtp_port = int(st.secrets.get("SMTP_PORT", 465))
+        smtp_user = st.secrets.get("SMTP_USER")
+        smtp_password = st.secrets.get("SMTP_PASSWORD")
+        destinatario = st.secrets.get("REPORT_EMAIL_TO")
+    except Exception:
+        smtp_host = smtp_port = smtp_user = smtp_password = destinatario = None
+
+    if not all([smtp_host, smtp_user, smtp_password, destinatario]):
+        return False, "Falta configurar SMTP_HOST, SMTP_USER, SMTP_PASSWORD y REPORT_EMAIL_TO en Secrets."
+
+    mensaje = EmailMessage()
+    mensaje["Subject"] = asunto
+    mensaje["From"] = smtp_user
+    mensaje["To"] = destinatario
+    mensaje.set_content("Adjunto se envía el reporte generado desde Gestión de Taller.")
+    mensaje.add_attachment(datos_pdf, maintype="application", subtype="pdf", filename=nombre_archivo)
+
+    try:
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as servidor:
+                servidor.login(smtp_user, smtp_password)
+                servidor.send_message(mensaje)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as servidor:
+                servidor.starttls()
+                servidor.login(smtp_user, smtp_password)
+                servidor.send_message(mensaje)
+        return True, destinatario
+    except Exception:
+        return False, "No se pudo enviar el correo. Verificá la configuración SMTP."
 
 # --- MANEJO SEGURO DE ESTADOS DE SESIÓN ---
 if "navegacion" not in st.session_state: st.session_state.navegacion = "📊 Tablero Taller"
@@ -539,13 +577,19 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 st.success("✅ Mantenimiento finalizado técnico en taller. ¡Ya podés descargar el reporte para facturar!")
                 
                 bytes_taller, nombre_taller = generar_pdf_taller(id_buscado)
-                st.download_button(
-                    label="📥 Descargar Reporte Técnico de Taller (Para Facturar)",
-                    data=bytes_taller,
-                    file_name=nombre_taller,
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                col_pdf_download, col_pdf_email = st.columns(2)
+                with col_pdf_download:
+                    st.download_button(
+                        label="📥 Descargar Reporte Técnico de Taller (Para Facturar)",
+                        data=bytes_taller,
+                        file_name=nombre_taller,
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                with col_pdf_email:
+                    if st.button("✉️ Enviar por email", key=f"mail_taller_{id_buscado}", use_container_width=True):
+                        enviado, detalle = enviar_pdf_por_email(bytes_taller, nombre_taller, "Reporte técnico de taller")
+                        (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
                 
                 st.write("---")
                 if st.button("📋 Iniciar Checklist de Salida / Entrega", use_container_width=True):
@@ -563,8 +607,14 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 c_pdf1, c_pdf2 = st.columns(2)
                 with c_pdf1:
                     st.download_button(label="📥 Descargar Reporte de Taller", data=bytes_taller, file_name=nombre_taller, mime="application/pdf", use_container_width=True, key=f"dl_t_{id_buscado}")
+                    if st.button("✉️ Enviar Reporte por email", key=f"mail_taller_entregado_{id_buscado}", use_container_width=True):
+                        enviado, detalle = enviar_pdf_por_email(bytes_taller, nombre_taller, "Reporte técnico de taller")
+                        (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
                 with c_pdf2:
                     st.download_button(label="📥 Descargar Certificado de Entrega", data=bytes_entrega, file_name=nombre_entrega, mime="application/pdf", use_container_width=True, key=f"dl_e_{id_buscado}")
+                    if st.button("✉️ Enviar Certificado por email", key=f"mail_entrega_{id_buscado}", use_container_width=True):
+                        enviado, detalle = enviar_pdf_por_email(bytes_entrega, nombre_entrega, "Certificado de entrega")
+                        (st.success if enviado else st.warning)(f"Certificado enviado a {detalle}." if enviado else detalle)
     conn.close()
 
 # ==========================================
@@ -747,13 +797,19 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                 st.success("🎉 ¡Mantenimiento finalizado! El Reporte de Taller se guardó en el servidor.")
                 
                 bytes_taller, nombre_taller = generar_pdf_taller(ingreso_id)
-                st.download_button(
-                    label="📄 Descargar Reporte Técnico de Taller Ahora (Para Facturar)",
-                    data=bytes_taller,
-                    file_name=nombre_taller,
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                col_pdf_download, col_pdf_email = st.columns(2)
+                with col_pdf_download:
+                    st.download_button(
+                        label="📄 Descargar Reporte Técnico de Taller Ahora (Para Facturar)",
+                        data=bytes_taller,
+                        file_name=nombre_taller,
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                with col_pdf_email:
+                    if st.button("✉️ Enviar por email", key=f"mail_mantenimiento_{ingreso_id}", use_container_width=True):
+                        enviado, detalle = enviar_pdf_por_email(bytes_taller, nombre_taller, "Reporte técnico de taller")
+                        (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
                 
                 if st.button("Volver al Tablero de Equipos", use_container_width=True, key="btn_volver_tablero_equipos"):
                     st.session_state.mant_queue = []
@@ -813,6 +869,9 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                 mime="application/pdf",
                 use_container_width=True
             )
+            if st.button("✉️ Enviar Certificado por email", key=f"mail_entrega_activa_{ingreso_id}", use_container_width=True):
+                enviado, detalle = enviar_pdf_por_email(bytes_entrega, nombre_entrega, "Certificado de entrega")
+                (st.success if enviado else st.warning)(f"Certificado enviado a {detalle}." if enviado else detalle)
             
             if st.button("Volver al Tablero", use_container_width=True, key="btn_volver_tablero_entrega"):
                 st.session_state.salida_ingreso_id = None
@@ -864,13 +923,17 @@ elif menu_elegido == "🗂️ Archivo de PDFs":
                     col1.write(f"📦 **[Entrega]** `{archivo}`")
                     
                 with open(os.path.join(carpeta_pdfs, archivo), "rb") as f:
+                    datos_archivo = f.read()
                     col2.download_button(
                         label="📥 Descargar",
-                        data=f,
+                        data=datos_archivo,
                         file_name=archivo,
                         mime="application/pdf",
                         key=f"btn_{archivo}"
                     )
+                    if col2.button("✉️ Enviar", key=f"mail_archivo_{archivo}"):
+                        enviado, detalle = enviar_pdf_por_email(datos_archivo, archivo, f"Comprobante {archivo}")
+                        (st.success if enviado else st.warning)(f"PDF enviado a {detalle}." if enviado else detalle)
         else:
             st.info("No se encontraron comprobantes que coincidan con la búsqueda.")
     else:
