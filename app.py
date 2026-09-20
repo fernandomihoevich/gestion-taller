@@ -542,7 +542,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
     st.title("🚜 Estado General y Flujo Técnico")
     conn = conectar_db()
     
-    df_incompletos = pd.read_sql_query("SELECT id, interno, mecanico, estado_proceso FROM equipos_ingresados WHERE estado_proceso IN ('En Proceso de Inspección', 'Checklist Salida en Proceso')", conn)
+    df_incompletos = pd.read_sql_query("SELECT id, interno, mecanico, estado_proceso FROM equipos_ingresados WHERE estado_proceso IN ('En Proceso de Inspección', 'Mantenimiento en Proceso', 'Checklist Salida en Proceso')", conn)
     if not df_incompletos.empty:
         st.warning("⚠️ Alerta: Existen Checklists guardados por la mitad")
         opciones_inc = {f"[{r['estado_proceso']}] {r['interno']} (ID: {r['id']})": r['id'] for _, r in df_incompletos.iterrows()}
@@ -563,6 +563,18 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 else:
                     st.session_state.paso_ingreso = "checklist"
                 cambiar_pagina("🚜 Ingreso de Equipo (Guiado)")
+            elif estado_inc == 'Mantenimiento en Proceso':
+                df_tareas_db = pd.read_sql_query("SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC", conn)
+                cola_trabajo = [{'tipo': 'mantenimiento', 'tarea': t} for t in df_tareas_db['descripcion'].tolist()]
+                df_malos = pd.read_sql_query("SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = ? AND estado = 'Malo'", conn, params=(id_retomar,))
+                for _, averia in df_malos.iterrows():
+                    cola_trabajo.append({'tipo': 'reparacion', 'tarea': f"[{averia['tarea']}] {averia['observaciones']}"})
+                hechas = pd.read_sql_query("SELECT tarea FROM controles_mantenimiento WHERE ingreso_id = ?", conn, params=(id_retomar,))['tarea'].tolist()
+                st.session_state.mant_queue = [tarea for tarea in cola_trabajo if tarea['tarea'] not in hechas]
+                st.session_state.mant_idx = 0
+                st.session_state.mant_ingreso_id = id_retomar
+                st.session_state.hallazgos_extras_ok = False
+                cambiar_pagina("🛠️ Ejecución de Mantenimiento")
             else:
                 controles_hechos = conn.execute("SELECT COUNT(*) FROM controles_salida WHERE ingreso_id = ?", (id_retomar,)).fetchone()[0]
                 st.session_state.salida_ingreso_id = id_retomar
@@ -825,6 +837,7 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                         st.session_state.idx_control_actual += 1
                     
                     conn.commit()
+                    st.rerun()
                     
     elif st.session_state.paso_ingreso == "fallas_adicionales":
         st.subheader("⚠️ Fallas o Roturas Adicionales")
@@ -953,7 +966,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                             conn.execute("INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)", (ingreso_id, item['tarea'], accion, notas.strip(), item['tipo']))
                             conn.commit()
                         st.session_state.mant_idx += 1
-                        pass
+                        st.rerun()
         conn.close()
 
 # ==========================================
@@ -1005,7 +1018,7 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                         conn.execute("INSERT INTO controles_salida (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", (ingreso_id, tarea_actual, estado, obs.strip()))
                         conn.commit()
                         st.session_state.idx_control_salida += 1
-                        pass
+                        st.rerun()
     conn.close()
 
 # =========================================================
