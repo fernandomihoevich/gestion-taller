@@ -570,8 +570,9 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 for _, averia in df_malos.iterrows():
                     cola_trabajo.append({'tipo': 'reparacion', 'tarea': f"[{averia['tarea']}] {averia['observaciones']}"})
                 hechas = pd.read_sql_query("SELECT tarea FROM controles_mantenimiento WHERE ingreso_id = ?", conn, params=(id_retomar,))['tarea'].tolist()
-                st.session_state.mant_queue = [tarea for tarea in cola_trabajo if tarea['tarea'] not in hechas]
-                st.session_state.mant_idx = 0
+                tareas_pendientes = [tarea for tarea in cola_trabajo if tarea['tarea'] not in hechas]
+                st.session_state.mant_queue = cola_trabajo
+                st.session_state.mant_idx = len(cola_trabajo) if not tareas_pendientes else cola_trabajo.index(tareas_pendientes[0])
                 st.session_state.mant_ingreso_id = id_retomar
                 st.session_state.hallazgos_extras_ok = False
                 cambiar_pagina("🛠️ Ejecución de Mantenimiento")
