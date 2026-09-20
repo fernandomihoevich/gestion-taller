@@ -262,9 +262,11 @@ def _crear_pdf(titulo, filas):
     pdf.ln(4)
     for etiqueta, valor in filas:
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(52, 7, _texto_pdf(f"{etiqueta}:"))
+        pdf.multi_cell(0, 7, _texto_pdf(f"{etiqueta}:"), wrapmode="CHAR")
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 7, _texto_pdf(valor))
+        for linea in _texto_pdf(valor).splitlines() or [" "]:
+            pdf.multi_cell(0, 6, linea or " ", wrapmode="CHAR")
+        pdf.ln(2)
     return bytes(pdf.output())
 
 
@@ -672,6 +674,21 @@ elif menu_elegido == "📊 Tablero de Equipos":
 
             elif estado_actual == 'Mantenimiento Completado':
                 st.success("✅ Mantenimiento finalizado técnico en taller. ¡Ya podés descargar el reporte para facturar!")
+
+                if st.button("🔄 Reabrir mantenimiento para corregir", use_container_width=True, key=f"reabrir_mantenimiento_{id_buscado}"):
+                    df_tareas_db = pd.read_sql_query("SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC", conn)
+                    cola_trabajo = [{'tipo': 'mantenimiento', 'tarea': t} for t in df_tareas_db['descripcion'].tolist()]
+                    df_malos = pd.read_sql_query("SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = ? AND estado = 'Malo'", conn, params=(id_buscado,))
+                    for _, averia in df_malos.iterrows():
+                        cola_trabajo.append({'tipo': 'reparacion', 'tarea': f"[{averia['tarea']}] {averia['observaciones']}"})
+                    st.session_state.mant_queue = cola_trabajo
+                    st.session_state.mant_idx = 0
+                    st.session_state.mant_ingreso_id = id_buscado
+                    st.session_state.hallazgos_extras_ok = False
+                    conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?", (id_buscado,))
+                    conn.commit()
+                    cambiar_pagina("🛠️ Ejecución de Mantenimiento")
+                    st.stop()
                 
                 bytes_taller, nombre_taller = generar_pdf_taller(id_buscado)
                 col_pdf_download, col_pdf_email = st.columns(2)
