@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from email.message import EmailMessage
+from fpdf import FPDF
 import os
 import smtplib
 
@@ -236,12 +237,108 @@ def persistir_y_sync():
 
 # --- FUNCIONES GENERADORAS DE PDF ---
 
+def _texto_pdf(valor):
+    return str(valor or "").encode("latin-1", "replace").decode("latin-1")
+
+
+def _guardar_pdf(datos_pdf, nombre_archivo):
+    carpeta_pdfs = "comprobantes"
+    os.makedirs(carpeta_pdfs, exist_ok=True)
+    ruta_pdf = os.path.join(carpeta_pdfs, nombre_archivo)
+    with open(ruta_pdf, "wb") as archivo:
+        archivo.write(datos_pdf)
+    return ruta_pdf
+
+
+def _crear_pdf(titulo, filas):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_title(_texto_pdf(titulo))
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, _texto_pdf(titulo), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 8, _texto_pdf(f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    for etiqueta, valor in filas:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(52, 7, _texto_pdf(f"{etiqueta}:"))
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 7, _texto_pdf(valor))
+    return bytes(pdf.output())
+
+
 def generar_pdf_taller(ingreso_id):
-    return b"", ""
+    conn = conectar_db()
+    try:
+        ingreso = conn.execute("""
+            SELECT e.id, e.interno, m.marca, m.modelo, e.horas, e.origen,
+                   e.mecanico, e.fecha_ingreso, e.hora_inicio, e.hora_fin,
+                   e.estado_proceso
+            FROM equipos_ingresados e
+            JOIN maestro_equipos m ON m.interno = e.interno
+            WHERE e.id = ?
+        """, (ingreso_id,)).fetchone()
+        if not ingreso:
+            raise ValueError(f"No existe el ingreso {ingreso_id}")
+
+        controles = conn.execute("""
+            SELECT tarea, estado, observaciones
+            FROM controles_ingreso WHERE ingreso_id = ? ORDER BY id
+        """, (ingreso_id,)).fetchall()
+        mantenimiento = conn.execute("""
+            SELECT tarea, estado, observaciones
+            FROM controles_mantenimiento WHERE ingreso_id = ? ORDER BY id
+        """, (ingreso_id,)).fetchall()
+        horas = conn.execute("""
+            SELECT fecha, horas, mecanico
+            FROM registro_horas WHERE ingreso_id = ? ORDER BY id
+        """, (ingreso_id,)).fetchall()
+
+        filas = [
+            ("Ingreso", ingreso[0]), ("Equipo", f"{ingreso[1]} - {ingreso[2]} {ingreso[3]}"),
+            ("Horometro", ingreso[4]), ("Origen", ingreso[5]), ("Mecanico", ingreso[6]),
+            ("Fecha ingreso", ingreso[7]), ("Estado", ingreso[10]),
+            ("Controles de ingreso", "\n".join(f"{r[0]}: {r[1]} - {r[2] or ''}" for r in controles) or "Sin controles"),
+            ("Mantenimiento", "\n".join(f"{r[0]}: {r[1]} - {r[2] or ''}" for r in mantenimiento) or "Sin tareas registradas"),
+            ("Horas registradas", "\n".join(f"{r[0]} - {r[1]} hs - {r[2]}" for r in horas) or "Sin horas registradas"),
+        ]
+        nombre = f"Reporte_Taller_{ingreso[1]}_{ingreso_id}.pdf"
+        datos = _crear_pdf("Reporte tecnico de taller", filas)
+        _guardar_pdf(datos, nombre)
+        return datos, nombre
+    finally:
+        conn.close()
 
 
 def generar_pdf_entrega(ingreso_id):
-    return b"", ""
+    conn = conectar_db()
+    try:
+        ingreso = conn.execute("""
+            SELECT e.id, e.interno, m.marca, m.modelo, e.fecha_ingreso,
+                   e.mecanico, e.estado_proceso
+            FROM equipos_ingresados e
+            JOIN maestro_equipos m ON m.interno = e.interno
+            WHERE e.id = ?
+        """, (ingreso_id,)).fetchone()
+        controles = conn.execute("""
+            SELECT tarea, estado, observaciones
+            FROM controles_salida WHERE ingreso_id = ? ORDER BY id
+        """, (ingreso_id,)).fetchall()
+        if not ingreso:
+            raise ValueError(f"No existe el ingreso {ingreso_id}")
+
+        filas = [
+            ("Ingreso", ingreso[0]), ("Equipo", f"{ingreso[1]} - {ingreso[2]} {ingreso[3]}"),
+            ("Fecha ingreso", ingreso[4]), ("Mecanico", ingreso[5]), ("Estado", ingreso[6]),
+            ("Checklist de salida", "\n".join(f"{r[0]}: {r[1]} - {r[2] or ''}" for r in controles) or "Sin controles"),
+        ]
+        nombre = f"Certificado_Entrega_{ingreso[1]}_{ingreso_id}.pdf"
+        datos = _crear_pdf("Certificado de entrega", filas)
+        _guardar_pdf(datos, nombre)
+        return datos, nombre
+    finally:
+        conn.close()
 
 
 def enviar_pdf_por_email(datos_pdf, nombre_archivo, asunto):
