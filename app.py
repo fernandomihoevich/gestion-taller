@@ -389,6 +389,7 @@ if "mant_ingreso_id" not in st.session_state: st.session_state.mant_ingreso_id =
 if "salida_ingreso_id" not in st.session_state: st.session_state.salida_ingreso_id = None
 if "idx_control_salida" not in st.session_state: st.session_state.idx_control_salida = 0
 if "hallazgos_extras_ok" not in st.session_state: st.session_state.hallazgos_extras_ok = False
+if "reporte_mantenimiento_solicitado" not in st.session_state: st.session_state.reporte_mantenimiento_solicitado = None
 
 # --- MENÚ LATERAL ---
 lista_opciones_menu = [
@@ -924,6 +925,9 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                 st.success("🎉 ¡Mantenimiento finalizado! El Reporte de Taller se guardó en el servidor.")
 
                 if st.button("📄 Generar reporte técnico", key=f"generar_reporte_mantenimiento_{ingreso_id}", use_container_width=True):
+                    st.session_state.reporte_mantenimiento_solicitado = ingreso_id
+
+                if st.session_state.reporte_mantenimiento_solicitado == ingreso_id:
                     bytes_taller, nombre_taller = generar_pdf_taller(ingreso_id)
                     col_pdf_download, col_pdf_email = st.columns(2)
                     with col_pdf_download:
