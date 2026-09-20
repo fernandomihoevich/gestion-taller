@@ -838,7 +838,6 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                         st.session_state.idx_control_actual += 1
                     
                     conn.commit()
-                    st.rerun()
                     
     elif st.session_state.paso_ingreso == "fallas_adicionales":
         st.subheader("⚠️ Fallas o Roturas Adicionales")
@@ -967,7 +966,6 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                             conn.execute("INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)", (ingreso_id, item['tarea'], accion, notas.strip(), item['tipo']))
                             conn.commit()
                         st.session_state.mant_idx += 1
-                        st.rerun()
         conn.close()
 
 # ==========================================
@@ -1019,7 +1017,6 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                         conn.execute("INSERT INTO controles_salida (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", (ingreso_id, tarea_actual, estado, obs.strip()))
                         conn.commit()
                         st.session_state.idx_control_salida += 1
-                        st.rerun()
     conn.close()
 
 # =========================================================
