@@ -992,7 +992,6 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
             )
             avanzar_mantenimiento = st.form_submit_button(
                 "Guardar / continuar",
-                key=f"guardar_mantenimiento_{ingreso_id}",
             )
 
         if avanzar_mantenimiento and not mantenimiento_cerrado:
