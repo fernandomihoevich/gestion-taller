@@ -430,6 +430,61 @@ def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
 
 
+def preparar_mantenimiento(ingreso_id, reabrir=False):
+    conn = conectar_db()
+    try:
+        tareas_df = pd.read_sql_query(
+            "SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC",
+            conn,
+        )
+        cola_completa = [
+            {"tipo": "mantenimiento", "tarea": tarea}
+            for tarea in tareas_df["descripcion"].tolist()
+        ]
+        fallas_df = pd.read_sql_query(
+            "SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = ? AND estado = 'Malo'",
+            conn,
+            params=(ingreso_id,),
+        )
+        for _, falla in fallas_df.iterrows():
+            cola_completa.append({
+                "tipo": "reparacion",
+                "tarea": f"[{falla['tarea']}] {falla['observaciones'] or ''}",
+            })
+
+        hechas_df = pd.read_sql_query(
+            "SELECT tarea FROM controles_mantenimiento WHERE ingreso_id = ?",
+            conn,
+            params=(ingreso_id,),
+        )
+        hechas = set(hechas_df["tarea"].tolist())
+        pendientes = [item for item in cola_completa if item["tarea"] not in hechas]
+
+        if pendientes:
+            st.session_state.mant_queue = pendientes
+            st.session_state.mant_idx = 0
+        else:
+            st.session_state.mant_queue = cola_completa or [{"tipo": "mantenimiento", "tarea": "Sin tareas pendientes"}]
+            st.session_state.mant_idx = len(st.session_state.mant_queue)
+
+        st.session_state.mant_ingreso_id = ingreso_id
+        st.session_state.hallazgos_extras_ok = False
+        conn.execute(
+            "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?",
+            (ingreso_id,),
+        )
+        conn.commit()
+        cambiar_pagina("🛠️ Ejecución de Mantenimiento")
+    finally:
+        conn.close()
+
+
+def pausar_mantenimiento():
+    st.session_state.mant_queue = []
+    st.session_state.hallazgos_extras_ok = False
+    cambiar_pagina("📊 Tablero de Equipos")
+
+
 def avanzar_paso_ingreso(nuevo_paso):
     st.session_state.paso_ingreso = nuevo_paso
 
@@ -548,40 +603,60 @@ elif menu_elegido == "📊 Tablero de Equipos":
         opciones_inc = {f"[{r['estado_proceso']}] {r['interno']} (ID: {r['id']})": r['id'] for _, r in df_incompletos.iterrows()}
         seleccion_inc = st.selectbox("Seleccione la tarea para retomarla:", list(opciones_inc.keys()))
         
-        if st.button("➡️ Retomar Tarea Seleccionada", use_container_width=True):
-            id_retomar = opciones_inc[seleccion_inc]
-            estado_inc = df_incompletos[df_incompletos['id'] == id_retomar].iloc[0]['estado_proceso']
-            
-            if estado_inc == 'En Proceso de Inspección':
-                controles_hechos = conn.execute("SELECT COUNT(*) FROM controles_ingreso WHERE ingreso_id = ? AND tarea != 'Falla Adicional Detectada'", (id_retomar,)).fetchone()[0]
-                total_lista = conn.execute("SELECT COUNT(*) FROM maestro_controles_ingreso").fetchone()[0]
-                st.session_state.ultimo_ingreso_id = id_retomar
+        id_retomar = opciones_inc[seleccion_inc]
+        estado_inc = df_incompletos[df_incompletos["id"] == id_retomar].iloc[0]["estado_proceso"]
+        if estado_inc == "En Proceso de Inspección":
+            def retomar_inspeccion(ingreso_id):
+                db = conectar_db()
+                try:
+                    controles_hechos = db.execute(
+                        "SELECT COUNT(*) FROM controles_ingreso WHERE ingreso_id = ? AND tarea != 'Falla Adicional Detectada'",
+                        (ingreso_id,),
+                    ).fetchone()[0]
+                    total_controles = db.execute("SELECT COUNT(*) FROM maestro_controles_ingreso").fetchone()[0]
+                finally:
+                    db.close()
+                st.session_state.ultimo_ingreso_id = ingreso_id
                 st.session_state.idx_control_actual = controles_hechos
-                
-                if controles_hechos >= total_lista:
-                    st.session_state.paso_ingreso = "fallas_adicionales"
-                else:
-                    st.session_state.paso_ingreso = "checklist"
+                st.session_state.paso_ingreso = "fallas_adicionales" if controles_hechos >= total_controles else "checklist"
                 cambiar_pagina("🚜 Ingreso de Equipo (Guiado)")
-            elif estado_inc == 'Mantenimiento en Proceso':
-                df_tareas_db = pd.read_sql_query("SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC", conn)
-                cola_trabajo = [{'tipo': 'mantenimiento', 'tarea': t} for t in df_tareas_db['descripcion'].tolist()]
-                df_malos = pd.read_sql_query("SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = ? AND estado = 'Malo'", conn, params=(id_retomar,))
-                for _, averia in df_malos.iterrows():
-                    cola_trabajo.append({'tipo': 'reparacion', 'tarea': f"[{averia['tarea']}] {averia['observaciones']}"})
-                hechas = pd.read_sql_query("SELECT tarea FROM controles_mantenimiento WHERE ingreso_id = ?", conn, params=(id_retomar,))['tarea'].tolist()
-                tareas_pendientes = [tarea for tarea in cola_trabajo if tarea['tarea'] not in hechas]
-                st.session_state.mant_queue = cola_trabajo
-                st.session_state.mant_idx = len(cola_trabajo) if not tareas_pendientes else cola_trabajo.index(tareas_pendientes[0])
-                st.session_state.mant_ingreso_id = id_retomar
-                st.session_state.hallazgos_extras_ok = False
-                cambiar_pagina("🛠️ Ejecución de Mantenimiento")
-            else:
-                controles_hechos = conn.execute("SELECT COUNT(*) FROM controles_salida WHERE ingreso_id = ?", (id_retomar,)).fetchone()[0]
-                st.session_state.salida_ingreso_id = id_retomar
+
+            st.button(
+                "➡️ Retomar Tarea Seleccionada",
+                key="retomar_tarea_incompleta",
+                use_container_width=True,
+                on_click=retomar_inspeccion,
+                args=(id_retomar,),
+            )
+        elif estado_inc == "Mantenimiento en Proceso":
+            st.button(
+                "➡️ Retomar Tarea Seleccionada",
+                key="retomar_tarea_incompleta",
+                use_container_width=True,
+                on_click=preparar_mantenimiento,
+                args=(id_retomar,),
+            )
+        else:
+            def retomar_salida(ingreso_id):
+                db = conectar_db()
+                try:
+                    controles_hechos = db.execute(
+                        "SELECT COUNT(*) FROM controles_salida WHERE ingreso_id = ?",
+                        (ingreso_id,),
+                    ).fetchone()[0]
+                finally:
+                    db.close()
+                st.session_state.salida_ingreso_id = ingreso_id
                 st.session_state.idx_control_salida = controles_hechos
                 cambiar_pagina("✅ Entrega de Equipo (Salida)")
-            pass
+
+            st.button(
+                "➡️ Retomar Tarea Seleccionada",
+                key="retomar_tarea_incompleta",
+                use_container_width=True,
+                on_click=retomar_salida,
+                args=(id_retomar,),
+            )
 
     with st.expander("➕ Crear equipo nuevo"):
         st.caption("Registrá el equipo antes de generar un ingreso o para corregir un ingreso existente.")
@@ -669,39 +744,24 @@ elif menu_elegido == "📊 Tablero de Equipos":
             
             if estado_actual == 'Inspección Inicial Completada':
                 st.info("💡 Inspección completa. Iniciar Mantenimiento.")
-                if st.button("🛠️ Iniciar Mantenimiento", use_container_width=True):
-                    df_tareas_db = pd.read_sql_query("SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC", conn)
-                    cola_trabajo = [{'tipo': 'mantenimiento', 'tarea': t} for t in df_tareas_db['descripcion'].tolist()]
-                    
-                    df_malos = pd.read_sql_query(f"SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = {id_buscado} AND estado = 'Malo'", conn)
-                    for _, averia in df_malos.iterrows():
-                        cola_trabajo.append({'tipo': 'reparacion', 'tarea': f"[{averia['tarea']}] {averia['observaciones']}"})
-                    
-                    st.session_state.mant_queue = cola_trabajo
-                    st.session_state.mant_idx = 0
-                    st.session_state.mant_ingreso_id = id_buscado
-                    st.session_state.hallazgos_extras_ok = False
-                    conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?", (id_buscado,))
-                    conn.commit()
-                    cambiar_pagina("🛠️ Ejecución de Mantenimiento")
+                st.button(
+                    "🛠️ Iniciar Mantenimiento",
+                    use_container_width=True,
+                    key=f"iniciar_mantenimiento_{id_buscado}",
+                    on_click=preparar_mantenimiento,
+                    args=(id_buscado,),
+                )
 
             elif estado_actual == 'Mantenimiento Completado':
                 st.success("✅ Mantenimiento finalizado técnico en taller. ¡Ya podés descargar el reporte para facturar!")
 
-                if st.button("🔄 Reabrir mantenimiento para corregir", use_container_width=True, key=f"reabrir_mantenimiento_{id_buscado}"):
-                    df_tareas_db = pd.read_sql_query("SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC", conn)
-                    cola_trabajo = [{'tipo': 'mantenimiento', 'tarea': t} for t in df_tareas_db['descripcion'].tolist()]
-                    df_malos = pd.read_sql_query("SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = ? AND estado = 'Malo'", conn, params=(id_buscado,))
-                    for _, averia in df_malos.iterrows():
-                        cola_trabajo.append({'tipo': 'reparacion', 'tarea': f"[{averia['tarea']}] {averia['observaciones']}"})
-                    st.session_state.mant_queue = cola_trabajo
-                    st.session_state.mant_idx = 0
-                    st.session_state.mant_ingreso_id = id_buscado
-                    st.session_state.hallazgos_extras_ok = False
-                    conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?", (id_buscado,))
-                    conn.commit()
-                    cambiar_pagina("🛠️ Ejecución de Mantenimiento")
-                    st.stop()
+                st.button(
+                    "🔄 Reabrir mantenimiento para corregir",
+                    use_container_width=True,
+                    key=f"reabrir_mantenimiento_{id_buscado}",
+                    on_click=preparar_mantenimiento,
+                    args=(id_buscado,),
+                )
                 
                 bytes_taller, nombre_taller = generar_pdf_taller(id_buscado)
                 col_pdf_download, col_pdf_email = st.columns(2)
@@ -896,70 +956,85 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                         conn.commit()
                         pass
             st.markdown("---")
-            if st.button("⏸️ Pausar Tareas", use_container_width=True, key="btn_pausar_tareas"):
-                st.session_state.mant_queue = [] 
-                cambiar_pagina("📊 Tablero de Equipos")
+            st.button(
+                "⏸️ Pausar Tareas",
+                use_container_width=True,
+                key=f"btn_pausar_tareas_{ingreso_id}",
+                on_click=pausar_mantenimiento,
+            )
 
-        if idx >= total:
-            st.subheader("🔧 Hallazgos extras y cierre del mantenimiento")
-            st.write("Si encontraste y solucionaste algo más que no estaba listado, detallalo acá. Al cerrar, el PDF se guarda en Archivo de PDFs para descargarlo o enviarlo por email.")
-            estado_mantenimiento = conn.execute(
-                "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
-                (ingreso_id,),
-            ).fetchone()[0]
-            mantenimiento_cerrado = estado_mantenimiento == "Mantenimiento Completado"
+        paso_en_curso = idx < total
+        item = cola[idx] if paso_en_curso else None
+        estado_mantenimiento = conn.execute(
+            "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+            (ingreso_id,),
+        ).fetchone()[0]
+        mantenimiento_cerrado = estado_mantenimiento == "Mantenimiento Completado"
 
-            with st.form("form_extras_mant"):
-                h1 = st.text_input("Hallazgo / Reparación extra 1:")
-                h2 = st.text_input("Hallazgo / Reparación extra 2:")
-                h3 = st.text_input("Hallazgo / Reparación extra 3:")
-                cerrar_mantenimiento = st.form_submit_button("✅ Guardar Extras y Finalizar Mantenimiento")
+        if paso_en_curso:
+            st.progress(idx / max(total, 1))
+            st.info(f"Operación {idx + 1} de {total}: {item['tarea']}")
+        else:
+            st.progress(1.0)
+            st.info("Etapa final: verificá hallazgos adicionales y cerrá el mantenimiento.")
 
-            if cerrar_mantenimiento and not mantenimiento_cerrado:
-                extras = [h for h in [h1, h2, h3] if h.strip()]
-                for hallazgo in extras:
+        with st.form(f"form_mantenimiento_{ingreso_id}", clear_on_submit=True):
+            accion = st.radio(
+                "Resultado:",
+                ["Realizado", "No Necesario", "Postergado", "Reparado", "No Reparado"],
+                horizontal=True,
+                index=None,
+                key=f"resultado_mantenimiento_{ingreso_id}",
+            )
+            notas = st.text_area(
+                "Notas, insumos o hallazgos adicionales (opcional):",
+                key=f"notas_mantenimiento_{ingreso_id}",
+            )
+            avanzar_mantenimiento = st.form_submit_button(
+                "Guardar / continuar",
+                key=f"guardar_mantenimiento_{ingreso_id}",
+            )
+
+        if avanzar_mantenimiento and not mantenimiento_cerrado:
+            if paso_en_curso:
+                resultados_validos = (
+                    {"Realizado", "No Necesario", "Postergado"}
+                    if item["tipo"] == "mantenimiento"
+                    else {"Reparado", "No Reparado"}
+                )
+                if accion not in resultados_validos:
+                    st.error("Seleccioná un resultado válido para esta operación.")
+                else:
+                    if accion == "Postergado":
+                        st.session_state.mant_queue.append(item)
+                    else:
+                        conn.execute(
+                            "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
+                            (ingreso_id, item["tarea"], accion, notas.strip(), item["tipo"]),
+                        )
+                        conn.commit()
+                    st.session_state.mant_idx += 1
+            else:
+                if notas.strip():
                     conn.execute(
                         "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
-                        (ingreso_id, "Reparación Adicional en proceso", "Reparado", hallazgo.strip(), "reparacion"),
+                        (ingreso_id, "Reparación Adicional en proceso", "Reparado", notas.strip(), "reparacion"),
                     )
-                conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?", (ingreso_id,))
+                conn.execute(
+                    "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?",
+                    (ingreso_id,),
+                )
                 conn.commit()
                 st.session_state.hallazgos_extras_ok = True
-                mantenimiento_cerrado = True
-
-            st.info("Al cerrar el mantenimiento, el reporte se genera y queda en Archivo de PDFs para descargarlo o enviarlo por email.")
-
-            if mantenimiento_cerrado:
                 generar_pdf_taller(ingreso_id)
 
-            if st.button("Volver al Tablero de Equipos", use_container_width=True, key="btn_volver_tablero_equipos"):
-                st.session_state.mant_queue = []
-                st.session_state.hallazgos_extras_ok = False
-                cambiar_pagina("📊 Tablero de Equipos")
-        else:
-            item = cola[idx]
-            st.progress((idx) / total)
-            st.write(f"🔧 **Operación {idx + 1} de {total} (Pendientes)**")
-            if item['tipo'] == 'mantenimiento': 
-                st.success(f"### {item['tarea']}")
-            else: 
-                st.error(f"**⚠️ REPARACIÓN DE AVERÍA DETECTADA**\n### {item['tarea']}")
-            
-            with st.form(f"form_execute_{idx}"):
-                respuestas = ["Realizado", "No Necesario", "Postergado"] if item['tipo'] == 'mantenimiento' else ["Reparado", "No Reparado"]
-                accion = st.radio("Resultado:", respuestas, horizontal=True, index=None)
-                notas = st.text_area("Notas / Insumos:")
-                if st.form_submit_button("Registrar Paso ➡️"):
-                    if accion is None:
-                        st.error("⚠️ Seleccioná un Resultado.")
-                    else:
-                        if accion == "Postergado":
-                            st.session_state.mant_queue.append(item)
-                            st.warning("🔄 Paso postergado.")
-                        else:
-                            conn.execute("INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)", (ingreso_id, item['tarea'], accion, notas.strip(), item['tipo']))
-                            conn.commit()
-                        st.session_state.mant_idx += 1
+        st.info("Al cerrar el mantenimiento, el PDF se guarda en Archivo de PDFs para descargarlo o enviarlo por email.")
+        st.button(
+            "Volver al Tablero de Equipos",
+            use_container_width=True,
+            key=f"btn_volver_tablero_equipos_{ingreso_id}",
+            on_click=pausar_mantenimiento,
+        )
         conn.close()
 
 # ==========================================
