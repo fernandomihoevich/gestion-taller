@@ -389,7 +389,9 @@ if "mant_ingreso_id" not in st.session_state: st.session_state.mant_ingreso_id =
 if "salida_ingreso_id" not in st.session_state: st.session_state.salida_ingreso_id = None
 if "idx_control_salida" not in st.session_state: st.session_state.idx_control_salida = 0
 if "hallazgos_extras_ok" not in st.session_state: st.session_state.hallazgos_extras_ok = False
-if "reporte_mantenimiento_solicitado" not in st.session_state: st.session_state.reporte_mantenimiento_solicitado = None
+if "reporte_mantenimiento_id" not in st.session_state: st.session_state.reporte_mantenimiento_id = None
+if "reporte_mantenimiento_bytes" not in st.session_state: st.session_state.reporte_mantenimiento_bytes = b""
+if "reporte_mantenimiento_nombre" not in st.session_state: st.session_state.reporte_mantenimiento_nombre = ""
 
 # --- MENÚ LATERAL ---
 lista_opciones_menu = [
@@ -925,23 +927,34 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                 st.success("🎉 ¡Mantenimiento finalizado! El Reporte de Taller se guardó en el servidor.")
 
                 if st.button("📄 Generar reporte técnico", key=f"generar_reporte_mantenimiento_{ingreso_id}", use_container_width=True):
-                    st.session_state.reporte_mantenimiento_solicitado = ingreso_id
+                    datos, nombre = generar_pdf_taller(ingreso_id)
+                    st.session_state.reporte_mantenimiento_id = ingreso_id
+                    st.session_state.reporte_mantenimiento_bytes = datos
+                    st.session_state.reporte_mantenimiento_nombre = nombre
 
-                if st.session_state.reporte_mantenimiento_solicitado == ingreso_id:
-                    bytes_taller, nombre_taller = generar_pdf_taller(ingreso_id)
-                    col_pdf_download, col_pdf_email = st.columns(2)
-                    with col_pdf_download:
-                        st.download_button(
-                            label="📥 Descargar Reporte Técnico de Taller",
-                            data=bytes_taller,
-                            file_name=nombre_taller,
-                            mime="application/pdf",
-                            use_container_width=True
-                        )
-                    with col_pdf_email:
-                        if st.button("✉️ Enviar por email", key=f"mail_mantenimiento_{ingreso_id}", use_container_width=True):
-                            enviado, detalle = enviar_pdf_por_email(bytes_taller, nombre_taller, "Reporte técnico de taller")
-                            (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
+                reporte_listo = st.session_state.reporte_mantenimiento_id == ingreso_id and bool(st.session_state.reporte_mantenimiento_bytes)
+                reporte_bytes = st.session_state.reporte_mantenimiento_bytes if reporte_listo else b""
+                reporte_nombre = st.session_state.reporte_mantenimiento_nombre if reporte_listo else f"Reporte_Taller_{ingreso_id}.pdf"
+                col_pdf_download, col_pdf_email = st.columns(2)
+                with col_pdf_download:
+                    st.download_button(
+                        label="📥 Descargar Reporte Técnico de Taller",
+                        data=reporte_bytes,
+                        file_name=reporte_nombre,
+                        mime="application/pdf",
+                        disabled=not reporte_listo,
+                        use_container_width=True,
+                        key=f"descargar_reporte_mantenimiento_{ingreso_id}",
+                    )
+                with col_pdf_email:
+                    if st.button(
+                        "✉️ Enviar por email",
+                        key=f"mail_mantenimiento_{ingreso_id}",
+                        disabled=not reporte_listo,
+                        use_container_width=True,
+                    ):
+                        enviado, detalle = enviar_pdf_por_email(reporte_bytes, reporte_nombre, "Reporte técnico de taller")
+                        (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
                 
                 if st.button("Volver al Tablero de Equipos", use_container_width=True, key="btn_volver_tablero_equipos"):
                     st.session_state.mant_queue = []
