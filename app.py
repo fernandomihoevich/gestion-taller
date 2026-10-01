@@ -902,18 +902,20 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
 
         if idx >= total:
             st.subheader("🔧 Hallazgos extras y cierre del mantenimiento")
-            st.write("Si encontraste y solucionaste algo más que no estaba listado, detallalo acá. Después guardá el cierre para habilitar el reporte.")
+            st.write("Si encontraste y solucionaste algo más que no estaba listado, detallalo acá. Al cerrar, el PDF se guarda en Archivo de PDFs para descargarlo o enviarlo por email.")
+            estado_mantenimiento = conn.execute(
+                "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+                (ingreso_id,),
+            ).fetchone()[0]
+            mantenimiento_cerrado = estado_mantenimiento == "Mantenimiento Completado"
 
             with st.form("form_extras_mant"):
                 h1 = st.text_input("Hallazgo / Reparación extra 1:")
                 h2 = st.text_input("Hallazgo / Reparación extra 2:")
                 h3 = st.text_input("Hallazgo / Reparación extra 3:")
-                cerrar_mantenimiento = st.form_submit_button(
-                    "✅ Guardar Extras y Finalizar Mantenimiento",
-                    disabled=st.session_state.hallazgos_extras_ok,
-                )
+                cerrar_mantenimiento = st.form_submit_button("✅ Guardar Extras y Finalizar Mantenimiento")
 
-            if cerrar_mantenimiento:
+            if cerrar_mantenimiento and not mantenimiento_cerrado:
                 extras = [h for h in [h1, h2, h3] if h.strip()]
                 for hallazgo in extras:
                     conn.execute(
@@ -923,34 +925,12 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                 conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?", (ingreso_id,))
                 conn.commit()
                 st.session_state.hallazgos_extras_ok = True
+                mantenimiento_cerrado = True
 
-            st.info(
-                "🎉 Mantenimiento finalizado. El reporte está listo."
-                if st.session_state.hallazgos_extras_ok
-                else "Completá el formulario para cerrar el mantenimiento y habilitar el reporte."
-            )
+            st.info("Al cerrar el mantenimiento, el reporte se genera y queda en Archivo de PDFs para descargarlo o enviarlo por email.")
 
-            reporte_bytes, reporte_nombre = generar_pdf_taller(ingreso_id)
-            col_pdf_download, col_pdf_email = st.columns(2)
-            with col_pdf_download:
-                st.download_button(
-                    label="📥 Descargar Reporte Técnico de Taller",
-                    data=reporte_bytes,
-                    file_name=reporte_nombre,
-                    mime="application/pdf",
-                    disabled=not st.session_state.hallazgos_extras_ok,
-                    use_container_width=True,
-                    key=f"descargar_reporte_mantenimiento_{ingreso_id}",
-                )
-            with col_pdf_email:
-                if st.button(
-                    "✉️ Enviar por email",
-                    key=f"mail_mantenimiento_{ingreso_id}",
-                    disabled=not st.session_state.hallazgos_extras_ok,
-                    use_container_width=True,
-                ):
-                    enviado, detalle = enviar_pdf_por_email(reporte_bytes, reporte_nombre, "Reporte técnico de taller")
-                    (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
+            if mantenimiento_cerrado:
+                generar_pdf_taller(ingreso_id)
 
             if st.button("Volver al Tablero de Equipos", use_container_width=True, key="btn_volver_tablero_equipos"):
                 st.session_state.mant_queue = []
