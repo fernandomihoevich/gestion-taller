@@ -485,6 +485,62 @@ def pausar_mantenimiento():
     cambiar_pagina("📊 Tablero de Equipos")
 
 
+def guardar_paso_mantenimiento():
+    ingreso_id = st.session_state.mant_ingreso_id
+    cola = st.session_state.mant_queue
+    indice = st.session_state.mant_idx
+    conn = conectar_db()
+    try:
+        estado_actual = conn.execute(
+            "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+            (ingreso_id,),
+        ).fetchone()
+        if not estado_actual or estado_actual[0] == "Mantenimiento Completado":
+            return
+
+        if indice < len(cola):
+            item = cola[indice]
+            accion = st.session_state.get(f"resultado_mantenimiento_{ingreso_id}")
+            notas = st.session_state.get(f"notas_mantenimiento_{ingreso_id}", "")
+            resultados_validos = (
+                {"Realizado", "No Necesario", "Postergado"}
+                if item["tipo"] == "mantenimiento"
+                else {"Reparado", "No Reparado"}
+            )
+            if accion not in resultados_validos:
+                st.session_state.mensaje_mantenimiento = "Seleccioná un resultado válido para esta operación."
+                return
+            if accion == "Postergado":
+                cola.append(item)
+            else:
+                conn.execute(
+                    "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
+                    (ingreso_id, item["tarea"], accion, notas.strip(), item["tipo"]),
+                )
+                conn.commit()
+            st.session_state.mant_idx = indice + 1
+        else:
+            notas = st.session_state.get(f"notas_mantenimiento_{ingreso_id}", "")
+            if notas.strip():
+                conn.execute(
+                    "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
+                    (ingreso_id, "Reparación Adicional en proceso", "Reparado", notas.strip(), "reparacion"),
+                )
+            conn.execute(
+                "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?",
+                (ingreso_id,),
+            )
+            conn.commit()
+            st.session_state.hallazgos_extras_ok = True
+            generar_pdf_taller(ingreso_id)
+
+        st.session_state[f"resultado_mantenimiento_{ingreso_id}"] = None
+        st.session_state[f"notas_mantenimiento_{ingreso_id}"] = ""
+        st.session_state.mensaje_mantenimiento = ""
+    finally:
+        conn.close()
+
+
 def avanzar_paso_ingreso(nuevo_paso):
     st.session_state.paso_ingreso = nuevo_paso
 
@@ -978,54 +1034,25 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
             st.progress(1.0)
             st.info("Etapa final: verificá hallazgos adicionales y cerrá el mantenimiento.")
 
-        with st.form(f"form_mantenimiento_{ingreso_id}", clear_on_submit=True):
-            accion = st.radio(
-                "Resultado:",
-                ["Realizado", "No Necesario", "Postergado", "Reparado", "No Reparado"],
-                horizontal=True,
-                index=None,
-                key=f"resultado_mantenimiento_{ingreso_id}",
-            )
-            notas = st.text_area(
-                "Notas, insumos o hallazgos adicionales (opcional):",
-                key=f"notas_mantenimiento_{ingreso_id}",
-            )
-            avanzar_mantenimiento = st.form_submit_button(
-                "Guardar / continuar",
-            )
-
-        if avanzar_mantenimiento and not mantenimiento_cerrado:
-            if paso_en_curso:
-                resultados_validos = (
-                    {"Realizado", "No Necesario", "Postergado"}
-                    if item["tipo"] == "mantenimiento"
-                    else {"Reparado", "No Reparado"}
-                )
-                if accion not in resultados_validos:
-                    st.error("Seleccioná un resultado válido para esta operación.")
-                else:
-                    if accion == "Postergado":
-                        st.session_state.mant_queue.append(item)
-                    else:
-                        conn.execute(
-                            "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
-                            (ingreso_id, item["tarea"], accion, notas.strip(), item["tipo"]),
-                        )
-                        conn.commit()
-                    st.session_state.mant_idx += 1
-            else:
-                if notas.strip():
-                    conn.execute(
-                        "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
-                        (ingreso_id, "Reparación Adicional en proceso", "Reparado", notas.strip(), "reparacion"),
-                    )
-                conn.execute(
-                    "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?",
-                    (ingreso_id,),
-                )
-                conn.commit()
-                st.session_state.hallazgos_extras_ok = True
-                generar_pdf_taller(ingreso_id)
+        st.radio(
+            "Resultado:",
+            ["Realizado", "No Necesario", "Postergado", "Reparado", "No Reparado"],
+            horizontal=True,
+            index=None,
+            key=f"resultado_mantenimiento_{ingreso_id}",
+        )
+        st.text_area(
+            "Notas, insumos o hallazgos adicionales (opcional):",
+            key=f"notas_mantenimiento_{ingreso_id}",
+        )
+        st.button(
+            "Guardar / continuar",
+            key=f"guardar_mantenimiento_{ingreso_id}",
+            on_click=guardar_paso_mantenimiento,
+        )
+        mensaje_mantenimiento = st.session_state.get("mensaje_mantenimiento")
+        if mensaje_mantenimiento:
+            st.warning(mensaje_mantenimiento)
 
         st.info("Al cerrar el mantenimiento, el PDF se guarda en Archivo de PDFs para descargarlo o enviarlo por email.")
         st.button(
