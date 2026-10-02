@@ -37,6 +37,18 @@ def _import_psycopg2():
     return psycopg2
 
 
+def _connect_postgres(db_url):
+    """Abre PostgreSQL con límites para que una consulta no bloquee la app."""
+    psy = _import_psycopg2()
+    if psy is None:
+        raise RuntimeError("psycopg2 no está instalado")
+    return psy.connect(
+        db_url,
+        connect_timeout=10,
+        options="-c statement_timeout=20000 -c lock_timeout=5000",
+    )
+
+
 def _is_cloud_environment():
     """Detecta si la app está corriendo en un entorno con secretos de Streamlit."""
     if os.environ.get('STREAMLIT_CLOUD') == 'true' or os.environ.get('DATABASE_URL'):
@@ -489,7 +501,7 @@ def conectar_db():
             if not db_url:
                 raise RuntimeError("DATABASE_URL no configurada")
 
-            conn = psycopg2.connect(db_url)
+            conn = _connect_postgres(db_url)
             conn.autocommit = False
             return _PostgresConnectionAdapter(conn)
         except Exception as e:
