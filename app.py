@@ -479,6 +479,33 @@ def preparar_mantenimiento(ingreso_id, reabrir=False):
         conn.close()
 
 
+def continuar_mantenimiento_desde_inspeccion(ingreso_id):
+    conn = conectar_db()
+    try:
+        controles_hechos = conn.execute(
+            "SELECT COUNT(DISTINCT tarea) FROM controles_ingreso WHERE ingreso_id = ? AND tarea != 'Falla Adicional Detectada'",
+            (ingreso_id,),
+        ).fetchone()[0]
+        total_controles = conn.execute(
+            "SELECT COUNT(*) FROM maestro_controles_ingreso"
+        ).fetchone()[0]
+        if controles_hechos < total_controles:
+            st.session_state.mensaje_reanudacion = (
+                f"La inspección tiene {controles_hechos} de {total_controles} controles; completala antes de iniciar mantenimiento."
+            )
+            return
+        conn.execute(
+            "UPDATE equipos_ingresados SET estado_proceso = 'Inspección Inicial Completada', hora_fin = ? WHERE id = ?",
+            (datetime.now().strftime("%d/%m/%Y %H:%M:%S"), ingreso_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    st.session_state.mensaje_reanudacion = ""
+    preparar_mantenimiento(ingreso_id)
+
+
 def pausar_mantenimiento():
     st.session_state.mant_queue = []
     st.session_state.hallazgos_extras_ok = False
@@ -684,6 +711,29 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 on_click=retomar_inspeccion,
                 args=(id_retomar,),
             )
+            db = conectar_db()
+            try:
+                controles_hechos = db.execute(
+                    "SELECT COUNT(DISTINCT tarea) FROM controles_ingreso WHERE ingreso_id = ? AND tarea != 'Falla Adicional Detectada'",
+                    (id_retomar,),
+                ).fetchone()[0]
+                total_controles = db.execute(
+                    "SELECT COUNT(*) FROM maestro_controles_ingreso"
+                ).fetchone()[0]
+            finally:
+                db.close()
+            if total_controles > 0 and controles_hechos >= total_controles:
+                st.caption("El checklist está completo aunque el ingreso aún figure como inspección en proceso.")
+                st.button(
+                    "🛠️ Continuar a mantenimiento",
+                    key=f"continuar_mantenimiento_inspeccion_{id_retomar}",
+                    use_container_width=True,
+                    on_click=continuar_mantenimiento_desde_inspeccion,
+                    args=(id_retomar,),
+                )
+            mensaje_reanudacion = st.session_state.get("mensaje_reanudacion")
+            if mensaje_reanudacion:
+                st.warning(mensaje_reanudacion)
         elif estado_inc == "Mantenimiento en Proceso":
             st.button(
                 "➡️ Retomar Tarea Seleccionada",
