@@ -430,6 +430,13 @@ def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
 
 
+def generar_reportes_y_abrir_archivo(ingreso_id, incluir_entrega=False):
+    generar_pdf_taller(ingreso_id)
+    if incluir_entrega:
+        generar_pdf_entrega(ingreso_id)
+    st.session_state.navegacion = "🗂️ Archivo de PDFs"
+
+
 def preparar_mantenimiento(ingreso_id, reabrir=False):
     conn = conectar_db()
     try:
@@ -868,21 +875,14 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     on_click=preparar_mantenimiento,
                     args=(id_buscado,),
                 )
-                
-                bytes_taller, nombre_taller = generar_pdf_taller(id_buscado)
-                col_pdf_download, col_pdf_email = st.columns(2)
-                with col_pdf_download:
-                    st.download_button(
-                        label="📥 Descargar Reporte Técnico de Taller (Para Facturar)",
-                        data=bytes_taller,
-                        file_name=nombre_taller,
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                with col_pdf_email:
-                    if st.button("✉️ Enviar por email", key=f"mail_taller_{id_buscado}", use_container_width=True):
-                        enviado, detalle = enviar_pdf_por_email(bytes_taller, nombre_taller, "Reporte técnico de taller")
-                        (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
+
+                st.button(
+                    "📄 Generar reporte y abrir Archivo de PDFs",
+                    key=f"generar_archivar_reporte_{id_buscado}",
+                    use_container_width=True,
+                    on_click=generar_reportes_y_abrir_archivo,
+                    args=(id_buscado,),
+                )
                 
                 st.write("---")
                 if st.button("📋 Iniciar Checklist de Salida / Entrega", use_container_width=True):
@@ -894,20 +894,13 @@ elif menu_elegido == "📊 Tablero de Equipos":
 
             elif estado_actual == 'Equipo Entregado':
                 st.success("🎉 Equipo entregado. Proceso finalizado en su totalidad.")
-                bytes_taller, nombre_taller = generar_pdf_taller(id_buscado)
-                bytes_entrega, nombre_entrega = generar_pdf_entrega(id_buscado)
-                
-                c_pdf1, c_pdf2 = st.columns(2)
-                with c_pdf1:
-                    st.download_button(label="📥 Descargar Reporte de Taller", data=bytes_taller, file_name=nombre_taller, mime="application/pdf", use_container_width=True, key=f"dl_t_{id_buscado}")
-                    if st.button("✉️ Enviar Reporte por email", key=f"mail_taller_entregado_{id_buscado}", use_container_width=True):
-                        enviado, detalle = enviar_pdf_por_email(bytes_taller, nombre_taller, "Reporte técnico de taller")
-                        (st.success if enviado else st.warning)(f"Reporte enviado a {detalle}." if enviado else detalle)
-                with c_pdf2:
-                    st.download_button(label="📥 Descargar Certificado de Entrega", data=bytes_entrega, file_name=nombre_entrega, mime="application/pdf", use_container_width=True, key=f"dl_e_{id_buscado}")
-                    if st.button("✉️ Enviar Certificado por email", key=f"mail_entrega_{id_buscado}", use_container_width=True):
-                        enviado, detalle = enviar_pdf_por_email(bytes_entrega, nombre_entrega, "Certificado de entrega")
-                        (st.success if enviado else st.warning)(f"Certificado enviado a {detalle}." if enviado else detalle)
+                st.button(
+                    "📄 Generar reportes y abrir Archivo de PDFs",
+                    key=f"generar_archivar_reportes_entrega_{id_buscado}",
+                    use_container_width=True,
+                    on_click=generar_reportes_y_abrir_archivo,
+                    args=(id_buscado, True),
+                )
     conn.close()
 
 # ==========================================
