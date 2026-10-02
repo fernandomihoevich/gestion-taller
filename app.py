@@ -430,11 +430,10 @@ def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
 
 
-def generar_reportes_y_abrir_archivo(ingreso_id, incluir_entrega=False):
+def generar_reportes(ingreso_id, incluir_entrega=False):
     generar_pdf_taller(ingreso_id)
     if incluir_entrega:
         generar_pdf_entrega(ingreso_id)
-    st.session_state.navegacion = "🗂️ Archivo de PDFs"
 
 
 def preparar_mantenimiento(ingreso_id, reabrir=False):
@@ -877,12 +876,13 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 )
 
                 st.button(
-                    "📄 Generar reporte y abrir Archivo de PDFs",
+                    "📄 Generar y guardar reporte PDF",
                     key=f"generar_archivar_reporte_{id_buscado}",
                     use_container_width=True,
-                    on_click=generar_reportes_y_abrir_archivo,
+                    on_click=generar_reportes,
                     args=(id_buscado,),
                 )
+                st.caption("Después de generarlo, abrí Archivo de PDFs desde el menú para descargarlo o enviarlo.")
                 
                 st.write("---")
                 if st.button("📋 Iniciar Checklist de Salida / Entrega", use_container_width=True):
@@ -895,10 +895,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
             elif estado_actual == 'Equipo Entregado':
                 st.success("🎉 Equipo entregado. Proceso finalizado en su totalidad.")
                 st.button(
-                    "📄 Generar reportes y abrir Archivo de PDFs",
+                    "📄 Generar y guardar reportes PDF",
                     key=f"generar_archivar_reportes_entrega_{id_buscado}",
                     use_container_width=True,
-                    on_click=generar_reportes_y_abrir_archivo,
+                    on_click=generar_reportes,
                     args=(id_buscado, True),
                 )
     conn.close()
