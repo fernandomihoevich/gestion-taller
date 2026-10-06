@@ -237,8 +237,15 @@ def persistir_y_sync():
 
 # --- FUNCIONES GENERADORAS DE PDF ---
 
+PDF_MAX_RECORDS_PER_SECTION = 250
+PDF_MAX_SECTION_CHARS = 5000
+
+
 def _texto_pdf(valor):
-    return str(valor or "").encode("latin-1", "replace").decode("latin-1")
+    texto = "" if valor is None else str(valor)
+    if len(texto) > PDF_MAX_SECTION_CHARS:
+        texto = texto[:PDF_MAX_SECTION_CHARS] + "\n[Contenido recortado para mantener el reporte manejable]"
+    return texto.encode("latin-1", "replace").decode("latin-1")
 
 
 def _guardar_pdf(datos_pdf, nombre_archivo):
@@ -284,17 +291,20 @@ def generar_pdf_taller(ingreso_id):
         if not ingreso:
             raise ValueError(f"No existe el ingreso {ingreso_id}")
 
-        controles = conn.execute("""
+        controles = conn.execute(f"""
             SELECT tarea, estado, observaciones
             FROM controles_ingreso WHERE ingreso_id = ? ORDER BY id
+            LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
-        mantenimiento = conn.execute("""
+        mantenimiento = conn.execute(f"""
             SELECT tarea, estado, observaciones
             FROM controles_mantenimiento WHERE ingreso_id = ? ORDER BY id
+            LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
-        horas = conn.execute("""
+        horas = conn.execute(f"""
             SELECT fecha, horas, mecanico
             FROM registro_horas WHERE ingreso_id = ? ORDER BY id
+            LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
 
         filas = [
@@ -323,9 +333,10 @@ def generar_pdf_entrega(ingreso_id):
             JOIN maestro_equipos m ON m.interno = e.interno
             WHERE e.id = ?
         """, (ingreso_id,)).fetchone()
-        controles = conn.execute("""
+        controles = conn.execute(f"""
             SELECT tarea, estado, observaciones
             FROM controles_salida WHERE ingreso_id = ? ORDER BY id
+            LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
         if not ingreso:
             raise ValueError(f"No existe el ingreso {ingreso_id}")
