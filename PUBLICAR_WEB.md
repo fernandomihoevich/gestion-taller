@@ -9,6 +9,7 @@
 
 ### Desventajas:
 - El filesystem local es temporal; no debe usarse para guardar datos
+- Los PDF disponibles en `comprobantes` no quedan archivados permanentemente en Streamlit Cloud
 - Límite de 1GB RAM
 
 ### Pasos:

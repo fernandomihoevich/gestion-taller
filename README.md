@@ -87,6 +87,8 @@ Para distribuir esta aplicación a otras computadoras:
 
 La aplicación usa una base de datos SQLite local (`taller_gestion.db`) que se guarda en la misma carpeta. Los datos se conservan entre ejecuciones.
 
+Los PDF pueden descargarse desde la aplicación y se intenta conservar una copia local en `comprobantes`. En Streamlit Cloud, ese almacenamiento es temporal y los PDF no quedan archivados permanentemente.
+
 ## 📞 Soporte
 
 Para problemas o sugerencias, revisa los logs de Streamlit en la terminal donde ejecutaste la aplicación.

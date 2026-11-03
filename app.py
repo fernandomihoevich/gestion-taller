@@ -2,9 +2,12 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from email.message import EmailMessage
-from fpdf import FPDF
+from fpdf import FPDF, FPDFException
 import os
+import re
+import sqlite3
 import smtplib
+from psycopg2 import Error as PsycopgError
 
 from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db, has_remote_db, IS_CLOUD
 
@@ -241,11 +244,27 @@ PDF_MAX_RECORDS_PER_SECTION = 250
 PDF_MAX_SECTION_CHARS = 5000
 
 
+class PdfGenerationError(RuntimeError):
+    pass
+
+
+def _valor_pdf(valor):
+    if valor is None or not str(valor).strip():
+        return "No informado"
+    return str(valor).strip()
+
+
 def _texto_pdf(valor):
-    texto = "" if valor is None else str(valor)
+    texto = _valor_pdf(valor)
     if len(texto) > PDF_MAX_SECTION_CHARS:
         texto = texto[:PDF_MAX_SECTION_CHARS] + "\n[Contenido recortado para mantener el reporte manejable]"
     return texto.encode("latin-1", "replace").decode("latin-1")
+
+
+def _nombre_pdf(prefijo, interno, ingreso_id):
+    seguro_id = re.sub(r"[^A-Za-z0-9_-]+", "_", _valor_pdf(ingreso_id)).strip("_") or "ingreso"
+    seguro_interno = re.sub(r"[^A-Za-z0-9_-]+", "_", _valor_pdf(interno)).strip("_") or "equipo"
+    return f"{prefijo}_{seguro_interno}_{seguro_id}.pdf"
 
 
 def _guardar_pdf(datos_pdf, nombre_archivo):
@@ -257,39 +276,110 @@ def _guardar_pdf(datos_pdf, nombre_archivo):
     return ruta_pdf
 
 
+def _guardar_pdf_si_posible(datos_pdf, nombre_archivo):
+    try:
+        _guardar_pdf(datos_pdf, nombre_archivo)
+    except OSError as exc:
+        st.warning(
+            "El PDF está listo para descargar, pero no se pudo guardar una copia local. "
+            f"No quedará disponible en Archivo de PDFs: {exc}"
+        )
+
+
 def _crear_pdf(titulo, filas):
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_title(_texto_pdf(titulo))
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, _texto_pdf(titulo), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 8, _texto_pdf(f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
-    for etiqueta, valor in filas:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.multi_cell(0, 7, _texto_pdf(f"{etiqueta}:"), wrapmode="CHAR")
+    try:
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_title(_texto_pdf(titulo))
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, _texto_pdf(titulo), new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
-        for linea in _texto_pdf(valor).splitlines() or [" "]:
-            pdf.multi_cell(0, 6, linea or " ", wrapmode="CHAR")
-        pdf.ln(2)
-    return bytes(pdf.output())
+        pdf.cell(
+            0,
+            8,
+            _texto_pdf(f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"),
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        pdf.ln(4)
+        for etiqueta, valor in filas:
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 7, _texto_pdf(f"{etiqueta}:"), wrapmode="CHAR")
+            pdf.set_font("Helvetica", "", 10)
+            for linea in _texto_pdf(valor).splitlines() or ["No informado"]:
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 6, linea or "No informado", wrapmode="CHAR")
+            pdf.ln(2)
+        contenido = bytes(pdf.output())
+        if not contenido.startswith(b"%PDF-"):
+            raise PdfGenerationError("La librería no produjo un archivo PDF válido.")
+        return contenido
+    except (FPDFException, OSError, UnicodeError, ValueError) as exc:
+        raise PdfGenerationError(f"No se pudo generar el PDF: {exc}") from exc
+
+
+def _lineas_registros(registros):
+    if not registros:
+        return "No informado"
+    return "\n".join(
+        f"Tarea: {_valor_pdf(registro[0])} | Estado: {_valor_pdf(registro[1])}"
+        f"{f' | Tipo: {_valor_pdf(registro[3])}' if len(registro) > 3 else ''} | "
+        f"Observaciones: {_valor_pdf(registro[2])}"
+        for registro in registros
+    )
+
+
+def _lineas_horas(registros):
+    if not registros:
+        return "No informado"
+    lineas = [
+        f"Fecha: {_valor_pdf(registro[0])} | Horas: {_valor_pdf(registro[1])} | "
+        f"Mecánico: {_valor_pdf(registro[2])}"
+        for registro in registros
+    ]
+    try:
+        total_horas = sum(float(registro[1] or 0) for registro in registros)
+    except (TypeError, ValueError):
+        total = "No informado"
+    else:
+        total = f"{total_horas:.2f}".replace(".", ",")
+    return f"Total de horas registradas: {total}\n" + "\n".join(lineas)
+
+
+def _datos_generales_pdf(ingreso):
+    return [
+        ("Ingreso", ingreso[0]),
+        ("Cliente", "No informado (el esquema no registra un cliente asociado al ingreso)"),
+        ("Interno", ingreso[1]),
+        ("Marca", ingreso[2]),
+        ("Modelo", ingreso[3]),
+        ("Tipo de equipo", ingreso[4]),
+        ("Horómetro al ingreso", ingreso[5]),
+        ("Origen / destino", ingreso[6]),
+        ("Mecánico asignado", ingreso[7]),
+        ("Fecha de ingreso", ingreso[8]),
+        ("Hora de inicio", ingreso[9]),
+        ("Hora de finalización", ingreso[10]),
+        ("Estado del proceso", ingreso[11]),
+    ]
 
 
 def generar_pdf_taller(ingreso_id):
-    conn = conectar_db()
+    conn = None
     try:
+        conn = conectar_db()
         ingreso = conn.execute("""
-            SELECT e.id, e.interno, m.marca, m.modelo, e.horas, e.origen,
+            SELECT e.id, e.interno, m.marca, m.modelo, m.tipo, e.horas, e.origen,
                    e.mecanico, e.fecha_ingreso, e.hora_inicio, e.hora_fin,
                    e.estado_proceso
             FROM equipos_ingresados e
-            JOIN maestro_equipos m ON m.interno = e.interno
+            LEFT JOIN maestro_equipos m ON m.interno = e.interno
             WHERE e.id = ?
         """, (ingreso_id,)).fetchone()
         if not ingreso:
-            raise ValueError(f"No existe el ingreso {ingreso_id}")
+            raise PdfGenerationError(f"No existe el ingreso {ingreso_id}.")
 
         controles = conn.execute(f"""
             SELECT tarea, estado, observaciones
@@ -297,7 +387,7 @@ def generar_pdf_taller(ingreso_id):
             LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
         mantenimiento = conn.execute(f"""
-            SELECT tarea, estado, observaciones
+            SELECT tarea, estado, observaciones, tipo_tarea
             FROM controles_mantenimiento WHERE ingreso_id = ? ORDER BY id
             LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
@@ -307,51 +397,67 @@ def generar_pdf_taller(ingreso_id):
             LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
 
-        filas = [
-            ("Ingreso", ingreso[0]), ("Equipo", f"{ingreso[1]} - {ingreso[2]} {ingreso[3]}"),
-            ("Horometro", ingreso[4]), ("Origen", ingreso[5]), ("Mecanico", ingreso[6]),
-            ("Fecha ingreso", ingreso[7]), ("Estado", ingreso[10]),
-            ("Controles de ingreso", "\n".join(f"{r[0]}: {r[1]} - {r[2] or ''}" for r in controles) or "Sin controles"),
-            ("Mantenimiento", "\n".join(f"{r[0]}: {r[1]} - {r[2] or ''}" for r in mantenimiento) or "Sin tareas registradas"),
-            ("Horas registradas", "\n".join(f"{r[0]} - {r[1]} hs - {r[2]}" for r in horas) or "Sin horas registradas"),
+        filas = _datos_generales_pdf(ingreso) + [
+            ("Inspección de ingreso", _lineas_registros(controles)),
+            ("Mantenimiento y reparaciones", _lineas_registros(mantenimiento)),
+            ("Horas de trabajo registradas", _lineas_horas(horas)),
         ]
-        nombre = f"Reporte_Taller_{ingreso[1]}_{ingreso_id}.pdf"
-        datos = _crear_pdf("Reporte tecnico de taller", filas)
-        _guardar_pdf(datos, nombre)
+        nombre = _nombre_pdf("Reporte_Taller", ingreso[1], ingreso_id)
+        datos = _crear_pdf("Reporte técnico de taller", filas)
+        _guardar_pdf_si_posible(datos, nombre)
         return datos, nombre
+    except (sqlite3.Error, PsycopgError) as exc:
+        raise PdfGenerationError(f"No se pudieron consultar los datos del ingreso: {exc}") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def generar_pdf_entrega(ingreso_id):
-    conn = conectar_db()
+    conn = None
     try:
+        conn = conectar_db()
         ingreso = conn.execute("""
-            SELECT e.id, e.interno, m.marca, m.modelo, e.fecha_ingreso,
-                   e.mecanico, e.estado_proceso
+            SELECT e.id, e.interno, m.marca, m.modelo, m.tipo, e.horas, e.origen,
+                   e.mecanico, e.fecha_ingreso, e.hora_inicio, e.hora_fin,
+                   e.estado_proceso
             FROM equipos_ingresados e
-            JOIN maestro_equipos m ON m.interno = e.interno
+            LEFT JOIN maestro_equipos m ON m.interno = e.interno
             WHERE e.id = ?
         """, (ingreso_id,)).fetchone()
-        controles = conn.execute(f"""
+        if not ingreso:
+            raise PdfGenerationError(f"No existe el ingreso {ingreso_id}.")
+
+        mantenimiento = conn.execute(f"""
+            SELECT tarea, estado, observaciones, tipo_tarea
+            FROM controles_mantenimiento WHERE ingreso_id = ? ORDER BY id
+            LIMIT {PDF_MAX_RECORDS_PER_SECTION}
+        """, (ingreso_id,)).fetchall()
+        controles_salida = conn.execute(f"""
             SELECT tarea, estado, observaciones
             FROM controles_salida WHERE ingreso_id = ? ORDER BY id
             LIMIT {PDF_MAX_RECORDS_PER_SECTION}
         """, (ingreso_id,)).fetchall()
-        if not ingreso:
-            raise ValueError(f"No existe el ingreso {ingreso_id}")
+        horas = conn.execute(f"""
+            SELECT fecha, horas, mecanico
+            FROM registro_horas WHERE ingreso_id = ? ORDER BY id
+            LIMIT {PDF_MAX_RECORDS_PER_SECTION}
+        """, (ingreso_id,)).fetchall()
 
-        filas = [
-            ("Ingreso", ingreso[0]), ("Equipo", f"{ingreso[1]} - {ingreso[2]} {ingreso[3]}"),
-            ("Fecha ingreso", ingreso[4]), ("Mecanico", ingreso[5]), ("Estado", ingreso[6]),
-            ("Checklist de salida", "\n".join(f"{r[0]}: {r[1]} - {r[2] or ''}" for r in controles) or "Sin controles"),
+        filas = _datos_generales_pdf(ingreso) + [
+            ("Mantenimiento y reparaciones realizadas", _lineas_registros(mantenimiento)),
+            ("Control de salida", _lineas_registros(controles_salida)),
+            ("Horas de trabajo registradas", _lineas_horas(horas)),
         ]
-        nombre = f"Certificado_Entrega_{ingreso[1]}_{ingreso_id}.pdf"
-        datos = _crear_pdf("Certificado de entrega", filas)
-        _guardar_pdf(datos, nombre)
+        nombre = _nombre_pdf("Certificado_Entrega", ingreso[1], ingreso_id)
+        datos = _crear_pdf("Certificado de entrega de equipo", filas)
+        _guardar_pdf_si_posible(datos, nombre)
         return datos, nombre
+    except (sqlite3.Error, PsycopgError) as exc:
+        raise PdfGenerationError(f"No se pudieron consultar los datos del ingreso: {exc}") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def enviar_pdf_por_email(datos_pdf, nombre_archivo, asunto):
@@ -442,9 +548,38 @@ def cambiar_pagina(nueva_pagina):
 
 
 def generar_reportes(ingreso_id, incluir_entrega=False):
-    generar_pdf_taller(ingreso_id)
-    if incluir_entrega:
-        generar_pdf_entrega(ingreso_id)
+    pdfs_generados = []
+    try:
+        pdfs_generados.append(generar_pdf_taller(ingreso_id))
+        if incluir_entrega:
+            pdfs_generados.append(generar_pdf_entrega(ingreso_id))
+    except PdfGenerationError as exc:
+        st.session_state[f"pdfs_generados_{ingreso_id}"] = pdfs_generados
+        st.session_state.mensaje_pdf = (
+            "error",
+            f"No se pudieron generar los PDF: {exc}",
+        )
+    else:
+        st.session_state[f"pdfs_generados_{ingreso_id}"] = pdfs_generados
+        st.session_state.mensaje_pdf = (
+            "success",
+            "Los PDF están listos para descargar.",
+        )
+
+
+def mostrar_descargas_pdf(ingreso_id):
+    for indice, (datos_pdf, nombre_archivo) in enumerate(
+        st.session_state.get(f"pdfs_generados_{ingreso_id}", [])
+    ):
+        tipo = "Reporte de Taller" if nombre_archivo.startswith("Reporte_Taller") else "Certificado de Entrega"
+        st.download_button(
+            label=f"📥 Descargar {tipo}",
+            data=datos_pdf,
+            file_name=nombre_archivo,
+            mime="application/pdf",
+            use_container_width=True,
+            key=f"dl_pdf_{ingreso_id}_{indice}",
+        )
 
 
 def preparar_mantenimiento(ingreso_id, reabrir=False):
@@ -533,6 +668,7 @@ def guardar_paso_mantenimiento():
     ingreso_id = st.session_state.mant_ingreso_id
     cola = st.session_state.mant_queue
     indice = st.session_state.mant_idx
+    st.session_state.mensaje_mantenimiento = ""
     conn = conectar_db()
     try:
         estado_actual = conn.execute(
@@ -576,11 +712,18 @@ def guardar_paso_mantenimiento():
             )
             conn.commit()
             st.session_state.hallazgos_extras_ok = True
-            generar_pdf_taller(ingreso_id)
+            try:
+                st.session_state[f"pdfs_generados_{ingreso_id}"] = [
+                    generar_pdf_taller(ingreso_id)
+                ]
+            except PdfGenerationError as exc:
+                st.session_state[f"pdfs_generados_{ingreso_id}"] = []
+                st.session_state.mensaje_mantenimiento = (
+                    f"Mantenimiento completado, pero no se pudo generar el PDF: {exc}"
+                )
 
         st.session_state[f"resultado_mantenimiento_{ingreso_id}"] = None
         st.session_state[f"notas_mantenimiento_{ingreso_id}"] = ""
-        st.session_state.mensaje_mantenimiento = ""
     finally:
         conn.close()
 
@@ -876,7 +1019,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 )
 
             elif estado_actual == 'Mantenimiento Completado':
-                st.success("✅ Mantenimiento finalizado técnico en taller. ¡Ya podés descargar el reporte para facturar!")
+                st.info("✅ Mantenimiento finalizado. Generá el reporte técnico para descargarlo.")
 
                 st.button(
                     "🔄 Reabrir mantenimiento para corregir",
@@ -893,7 +1036,15 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     on_click=generar_reportes,
                     args=(id_buscado,),
                 )
-                st.caption("Después de generarlo, abrí Archivo de PDFs desde el menú para descargarlo o enviarlo.")
+                mensaje_pdf = st.session_state.pop("mensaje_pdf", None)
+                if mensaje_pdf:
+                    nivel, mensaje = mensaje_pdf
+                    (st.error if nivel == "error" else st.success)(mensaje)
+                mostrar_descargas_pdf(id_buscado)
+                st.caption(
+                    "Al generarlo, el PDF estará disponible para descarga. Si se guarda una copia local, "
+                    "en Streamlit Cloud no será permanente."
+                )
                 
                 st.write("---")
                 if st.button("📋 Iniciar Checklist de Salida / Entrega", use_container_width=True):
@@ -912,6 +1063,11 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     on_click=generar_reportes,
                     args=(id_buscado, True),
                 )
+                mensaje_pdf = st.session_state.pop("mensaje_pdf", None)
+                if mensaje_pdf:
+                    nivel, mensaje = mensaje_pdf
+                    (st.error if nivel == "error" else st.success)(mensaje)
+                mostrar_descargas_pdf(id_buscado)
     conn.close()
 
 # ==========================================
@@ -1107,8 +1263,13 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
         mensaje_mantenimiento = st.session_state.get("mensaje_mantenimiento")
         if mensaje_mantenimiento:
             st.warning(mensaje_mantenimiento)
+        mostrar_descargas_pdf(ingreso_id)
 
-        st.info("Al cerrar el mantenimiento, el PDF se guarda en Archivo de PDFs para descargarlo o enviarlo por email.")
+        if not mensaje_mantenimiento:
+            st.info(
+                "Al cerrar el mantenimiento, el PDF queda disponible para descarga. También se intenta guardar "
+                "una copia en la carpeta local; en Streamlit Cloud, ese archivo no queda archivado permanentemente."
+            )
         st.button(
             "Volver al Tablero de Equipos",
             use_container_width=True,
@@ -1133,20 +1294,29 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
         if idx >= len(lista_salida):
             conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Equipo Entregado' WHERE id = ?", (ingreso_id,))
             conn.commit()
-            st.success("🎉 ¡Checklist de Salida Completado! El equipo quedó habilitado para ser retirado.")
-            st.balloons()
-            
-            bytes_entrega, nombre_entrega = generar_pdf_entrega(ingreso_id)
-            st.download_button(
-                label="📄 Descargar Certificado de Entrega (PDF)",
-                data=bytes_entrega,
-                file_name=nombre_entrega,
-                mime="application/pdf",
-                use_container_width=True
-            )
-            if st.button("✉️ Enviar Certificado por email", key=f"mail_entrega_activa_{ingreso_id}", use_container_width=True):
-                enviado, detalle = enviar_pdf_por_email(bytes_entrega, nombre_entrega, "Certificado de entrega")
-                (st.success if enviado else st.warning)(f"Certificado enviado a {detalle}." if enviado else detalle)
+            try:
+                bytes_entrega, nombre_entrega = generar_pdf_entrega(ingreso_id)
+            except PdfGenerationError as exc:
+                st.error(f"No se pudo generar el Certificado de Entrega: {exc}")
+                st.info("El checklist quedó completado, pero el certificado no está disponible para descargar.")
+            else:
+                st.success("🎉 ¡Checklist de Salida Completado! El equipo quedó habilitado para ser retirado.")
+                st.balloons()
+                st.download_button(
+                    label="📄 Descargar Certificado de Entrega (PDF)",
+                    data=bytes_entrega,
+                    file_name=nombre_entrega,
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"dl_entrega_checklist_{ingreso_id}",
+                )
+                if st.button("✉️ Enviar Certificado por email", key=f"mail_entrega_activa_{ingreso_id}", use_container_width=True):
+                    enviado, detalle = enviar_pdf_por_email(bytes_entrega, nombre_entrega, "Certificado de entrega")
+                    (st.success if enviado else st.warning)(f"Certificado enviado a {detalle}." if enviado else detalle)
+                st.caption(
+                    "El certificado se descarga en tu dispositivo. La copia local no queda archivada "
+                    "permanentemente en Streamlit Cloud."
+                )
             
             if st.button("Volver al Tablero", use_container_width=True, key="btn_volver_tablero_entrega"):
                 st.session_state.salida_ingreso_id = None
@@ -1173,7 +1343,8 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
 # =========================================================
 elif menu_elegido == "🗂️ Archivo de PDFs":
     st.title("🗂️ Archivo de Comprobantes")
-    st.write("Desde acá podés buscar y descargar los Reportes de Taller y Certificados de Entrega directamente a tu tablet.")
+    st.write("Desde acá podés descargar los PDF que estén disponibles en la carpeta local `comprobantes`.")
+    st.info("En Streamlit Cloud, esta carpeta es temporal: los archivos no quedan archivados permanentemente.")
     
     carpeta_pdfs = "comprobantes" 
     
