@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from fpdf import FPDF, FPDFException
 import os
@@ -496,7 +496,7 @@ def enviar_pdf_por_email(datos_pdf, nombre_archivo, asunto):
         return False, "No se pudo enviar el correo. Verificá la configuración SMTP."
 
 # --- MANEJO SEGURO DE ESTADOS DE SESIÓN ---
-if "navegacion" not in st.session_state: st.session_state.navegacion = "📊 Tablero Taller"
+if "navegacion" not in st.session_state: st.session_state.navegacion = "🏠 Inicio semanal"
 if "paso_ingreso" not in st.session_state: st.session_state.paso_ingreso = "registro_inicial"
 if "ultimo_ingreso_id" not in st.session_state: st.session_state.ultimo_ingreso_id = None
 if "idx_control_actual" not in st.session_state: st.session_state.idx_control_actual = 0
@@ -509,6 +509,7 @@ if "hallazgos_extras_ok" not in st.session_state: st.session_state.hallazgos_ext
 
 # --- MENÚ LATERAL ---
 lista_opciones_menu = [
+    "🏠 Inicio semanal",
     "📊 Tablero Taller", 
     "📊 Tablero de Equipos",
     "💼 Trabajos Clientes",
@@ -545,6 +546,199 @@ menu_elegido = st.session_state.navegacion
 
 def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
+
+
+def _fecha_agenda(valor):
+    if valor is None or pd.isna(valor):
+        return None
+    texto = str(valor).strip()
+    for formato in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(texto, formato).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _cargar_trabajos_agenda(conn):
+    trabajos = []
+    fechas_invalidas = 0
+
+    internos = pd.read_sql_query("""
+        SELECT id, titulo, descripcion, fecha_entrega, prioridad, mecanico, estado
+        FROM pendientes_taller
+        WHERE estado = 'Pendiente'
+        ORDER BY fecha_entrega, id
+    """, conn)
+    for _, fila in internos.iterrows():
+        fecha = _fecha_agenda(fila["fecha_entrega"])
+        if fecha is None:
+            fechas_invalidas += 1
+            continue
+        trabajos.append({
+            "tipo": "interno",
+            "id": int(fila["id"]),
+            "fecha": fecha,
+            "fecha_rotulo": "Entrega estimada",
+            "titulo": fila["titulo"],
+            "descripcion": fila["descripcion"],
+            "cliente": "Taller propio",
+            "equipo": None,
+            "responsable": fila["mecanico"],
+            "estado": fila["estado"],
+            "prioridad": fila["prioridad"],
+        })
+
+    clientes = pd.read_sql_query("""
+        SELECT id, cliente, tarea, estado, fecha_programada
+        FROM trabajos_clientes
+        WHERE estado = 'Pendiente'
+        ORDER BY fecha_programada, id
+    """, conn)
+    for _, fila in clientes.iterrows():
+        fecha = _fecha_agenda(fila["fecha_programada"])
+        if fecha is None:
+            fechas_invalidas += 1
+            continue
+        trabajos.append({
+            "tipo": "cliente",
+            "id": int(fila["id"]),
+            "fecha": fecha,
+            "fecha_rotulo": "Programado",
+            "titulo": fila["tarea"],
+            "descripcion": None,
+            "cliente": fila["cliente"],
+            "equipo": None,
+            "responsable": None,
+            "estado": fila["estado"],
+            "prioridad": None,
+        })
+
+    mantenimientos = pd.read_sql_query("""
+        SELECT e.id, e.interno, e.origen, e.mecanico, e.fecha_ingreso,
+               e.estado_proceso, m.marca, m.modelo,
+               (SELECT cm.tarea FROM controles_mantenimiento cm
+                WHERE cm.ingreso_id = e.id ORDER BY cm.id DESC LIMIT 1) AS ultima_tarea,
+               (SELECT cm.estado FROM controles_mantenimiento cm
+                WHERE cm.ingreso_id = e.id ORDER BY cm.id DESC LIMIT 1) AS estado_ultima_tarea
+        FROM equipos_ingresados e
+        LEFT JOIN maestro_equipos m ON m.interno = e.interno
+        WHERE e.estado_proceso IN (
+            'En Proceso de Inspección',
+            'Inspección Inicial Completada',
+            'Mantenimiento en Proceso',
+            'Checklist Salida en Proceso'
+        )
+        ORDER BY e.fecha_ingreso, e.id
+    """, conn)
+    for _, fila in mantenimientos.iterrows():
+        fecha = _fecha_agenda(fila["fecha_ingreso"])
+        if fecha is None:
+            fechas_invalidas += 1
+            continue
+        trabajos.append({
+            "tipo": "mantenimiento",
+            "id": int(fila["id"]),
+            "fecha": fecha,
+            "fecha_rotulo": "Fecha de ingreso (sin turno programado)",
+            "titulo": f"Unidad {fila['interno']}",
+            "descripcion": f"{fila['estado_proceso']}",
+            "ultima_tarea": fila["ultima_tarea"],
+            "estado_ultima_tarea": fila["estado_ultima_tarea"],
+            "cliente": fila["origen"],
+            "equipo": " ".join(str(parte) for parte in (fila["marca"], fila["modelo"]) if pd.notna(parte)),
+            "responsable": fila["mecanico"],
+            "estado": fila["estado_proceso"],
+            "prioridad": None,
+        })
+
+    trabajos.sort(key=lambda trabajo: (trabajo["fecha"], trabajo["tipo"], trabajo["id"]))
+    return trabajos, fechas_invalidas
+
+
+def _nombre_dia(fecha):
+    dias = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+    return dias[fecha.weekday()].capitalize()
+
+
+def _fecha_legible(fecha):
+    meses = (
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    )
+    return f"{fecha.day} de {meses[fecha.month - 1]} de {fecha.year}"
+
+
+def _ir_a_detalle_agenda(tipo, trabajo_id):
+    destino = {
+        "interno": "📊 Tablero Taller",
+        "cliente": "💼 Trabajos Clientes",
+        "mantenimiento": "📊 Tablero de Equipos",
+    }[tipo]
+    st.session_state.detalle_agenda = (tipo, trabajo_id)
+    st.session_state.navegacion = destino
+
+
+def _volver_a_agenda():
+    st.session_state.pop("detalle_agenda", None)
+    st.session_state.navegacion = "🏠 Inicio semanal"
+
+
+def _mostrar_volver_a_agenda(tipo):
+    detalle = st.session_state.get("detalle_agenda")
+    if detalle and detalle[0] == tipo:
+        st.caption("Abriste este trabajo desde la agenda semanal.")
+        st.button(
+            "← Volver a la semana consultada",
+            key=f"volver_agenda_{tipo}",
+            on_click=_volver_a_agenda,
+        )
+
+
+def _mostrar_tarjeta_agenda(trabajo, atrasada=False):
+    etiquetas = {
+        "interno": "🛠️ Interno",
+        "cliente": "📍 Cliente",
+        "mantenimiento": "🔧 Mantenimiento",
+    }
+    etiqueta = etiquetas[trabajo["tipo"]]
+    etiquetas_ubicacion = {
+        "interno": "Ubicación",
+        "cliente": "Cliente",
+        "mantenimiento": "Origen / destino",
+    }
+    with st.container(border=True):
+        st.markdown(f"**{etiqueta} · {trabajo['titulo']}**")
+        if trabajo["cliente"]:
+            st.caption(f"{etiquetas_ubicacion[trabajo['tipo']]}: {trabajo['cliente']}")
+        if trabajo["equipo"]:
+            st.caption(f"Equipo: {trabajo['equipo']}")
+        if trabajo["descripcion"]:
+            st.write(trabajo["descripcion"])
+        if trabajo.get("ultima_tarea"):
+            st.caption(
+                f"Última tarea registrada: {trabajo['ultima_tarea']} "
+                f"({trabajo['estado_ultima_tarea'] or 'estado no informado'})"
+            )
+        detalles = [
+            f"{trabajo['fecha_rotulo']}: {trabajo['fecha'].strftime('%d/%m/%Y')}",
+            f"Estado: {trabajo['estado'] or 'No informado'}",
+        ]
+        if trabajo["responsable"]:
+            detalles.append(f"Responsable: {trabajo['responsable']}")
+        if trabajo["prioridad"]:
+            detalles.append(f"Prioridad: {trabajo['prioridad']}")
+        if atrasada:
+            dias_atraso = (date.today() - trabajo["fecha"]).days
+            detalles.append(f"Atraso: {dias_atraso} día(s)")
+        st.caption(" · ".join(detalles))
+        st.button(
+            "Abrir detalle →",
+            key=f"agenda_{trabajo['tipo']}_{trabajo['id']}_{'atraso' if atrasada else 'semana'}",
+            on_click=_ir_a_detalle_agenda,
+            args=(trabajo["tipo"], trabajo["id"]),
+            use_container_width=True,
+        )
 
 
 def generar_reportes(ingreso_id, incluir_entrega=False):
@@ -739,10 +933,109 @@ def colorear_estados(val):
     return ''
 
 # ==========================================
-# 1. PANTALLA: TABLERO TALLER (TRABAJOS INTERNOS)
+# 1. PANTALLA: AGENDA SEMANAL
 # ==========================================
-if menu_elegido == "📊 Tablero Taller":
+if menu_elegido == "🏠 Inicio semanal":
+    st.title("🏠 Agenda semanal del taller")
+    conn = conectar_db()
+    try:
+        trabajos_agenda, fechas_invalidas = _cargar_trabajos_agenda(conn)
+    finally:
+        conn.close()
+
+    if "agenda_semana_offset" not in st.session_state:
+        st.session_state.agenda_semana_offset = 0
+    hoy = date.today()
+    lunes_actual = hoy - timedelta(days=hoy.weekday())
+    lunes = lunes_actual + timedelta(weeks=st.session_state.agenda_semana_offset)
+    viernes = lunes + timedelta(days=4)
+    domingo = lunes + timedelta(days=6)
+
+    col_anterior, col_rango, col_siguiente = st.columns([1, 3, 1])
+    with col_anterior:
+        if st.button("← Semana anterior", key="agenda_semana_anterior", use_container_width=True):
+            st.session_state.agenda_semana_offset -= 1
+            st.rerun()
+    with col_rango:
+        st.markdown(
+            f"### {_fecha_legible(lunes)} — {_fecha_legible(viernes)}"
+            f"\n\nSemana de lunes a viernes · hoy: **{_fecha_legible(hoy)}**"
+        )
+    with col_siguiente:
+        if st.button("Semana siguiente →", key="agenda_semana_siguiente", use_container_width=True):
+            st.session_state.agenda_semana_offset += 1
+            st.rerun()
+
+    trabajos_semana = [trabajo for trabajo in trabajos_agenda if lunes <= trabajo["fecha"] <= viernes]
+    trabajos_fin_semana = [trabajo for trabajo in trabajos_agenda if viernes < trabajo["fecha"] <= domingo]
+    trabajos_atrasados = [
+        trabajo for trabajo in trabajos_agenda
+        if trabajo["tipo"] in {"interno", "cliente"} and trabajo["fecha"] < hoy
+    ]
+
+    col_agenda, col_atrasados = st.columns([3, 1], gap="large")
+    with col_agenda:
+        st.subheader("Agenda de lunes a viernes")
+        for numero_dia in range(5):
+            fecha_dia = lunes + timedelta(days=numero_dia)
+            trabajos_dia = [trabajo for trabajo in trabajos_semana if trabajo["fecha"] == fecha_dia]
+            marca_hoy = " · HOY" if fecha_dia == hoy else ""
+            st.markdown(f"### {_nombre_dia(fecha_dia)} {fecha_dia.strftime('%d/%m')}{marca_hoy}")
+            if fecha_dia == hoy:
+                st.markdown(
+                    "<div style='height:3px;background:#e76f32;border-radius:3px;margin:-0.5rem 0 0.75rem'></div>",
+                    unsafe_allow_html=True,
+                )
+            if trabajos_dia:
+                for trabajo in trabajos_dia:
+                    _mostrar_tarjeta_agenda(trabajo)
+            else:
+                st.caption("Sin trabajos pendientes para este día.")
+
+        with st.expander(
+            f"Fuera de la semana laboral · sábado y domingo ({len(trabajos_fin_semana)})",
+            expanded=bool(trabajos_fin_semana),
+        ):
+            if trabajos_fin_semana:
+                for fecha_dia in (viernes + timedelta(days=1), domingo):
+                    trabajos_dia = [trabajo for trabajo in trabajos_fin_semana if trabajo["fecha"] == fecha_dia]
+                    st.markdown(f"### {_nombre_dia(fecha_dia)} {fecha_dia.strftime('%d/%m')}")
+                    for trabajo in trabajos_dia:
+                        _mostrar_tarjeta_agenda(trabajo)
+            else:
+                st.caption("No hay trabajos pendientes programados para el fin de semana.")
+
+    with col_atrasados:
+        st.subheader(f"⚠️ Atrasados · {len(trabajos_atrasados)}")
+        st.caption("Solo se consideran trabajos internos y de clientes en estado Pendiente.")
+        st.caption("Los ingresos técnicos no se clasifican como atrasados: solo tienen fecha de ingreso, no turno programado.")
+        if trabajos_atrasados:
+            for trabajo in trabajos_atrasados:
+                _mostrar_tarjeta_agenda(trabajo, atrasada=True)
+        else:
+            st.success("No hay trabajos internos o de clientes atrasados.")
+
+    if fechas_invalidas:
+        st.info(
+            f"Se omitieron {fechas_invalidas} registros activos cuya fecha no se pudo interpretar. "
+            "No se muestran tareas sin una fecha válida."
+        )
+    ingresos_tecnicos = sum(
+        trabajo["tipo"] == "mantenimiento" for trabajo in trabajos_agenda
+    )
+    st.caption(
+        f"Pendientes incluidos: {sum(trabajo['tipo'] == 'interno' for trabajo in trabajos_agenda)} internos, "
+        f"{sum(trabajo['tipo'] == 'cliente' for trabajo in trabajos_agenda)} de clientes y "
+        f"{ingresos_tecnicos} ingresos activos del flujo técnico. "
+        "Los ingresos técnicos se ubican por fecha de ingreso porque la base no registra un turno programado."
+    )
+
+# ==========================================
+# 2. PANTALLA: TABLERO TALLER (TRABAJOS INTERNOS)
+# ==========================================
+elif menu_elegido == "📊 Tablero Taller":
     st.title("📊 Tablero Taller: Gestión de Trabajos Internos")
+    _mostrar_volver_a_agenda("interno")
     conn = conectar_db()
     cursor = conn.cursor()
     
@@ -791,7 +1084,10 @@ if menu_elegido == "📊 Tablero Taller":
                 es_finalizado = row['estado'] in ['Realizado', 'Terminado']
                 icono = "✅" if es_finalizado else "🛠️"
                 
-                with st.expander(f"{icono} {row['titulo']} — Mecánico: {row['mecanico']} [{row['estado']}]"):
+                with st.expander(
+                    f"{icono} {row['titulo']} — Mecánico: {row['mecanico']} [{row['estado']}]",
+                    expanded=st.session_state.get("detalle_agenda") == ("interno", int(row["id"])),
+                ):
                     with st.form(f"form_edit_taller_{row['id']}"):
                         edit_titulo = st.text_input("Título:", value=row['titulo'])
                         edit_desc = st.text_area("Descripción:", value=row['descripcion'] if row['descripcion'] else "")
@@ -838,13 +1134,28 @@ if menu_elegido == "📊 Tablero Taller":
 # ==========================================
 elif menu_elegido == "📊 Tablero de Equipos":
     st.title("🚜 Estado General y Flujo Técnico")
+    _mostrar_volver_a_agenda("mantenimiento")
     conn = conectar_db()
     
     df_incompletos = pd.read_sql_query("SELECT id, interno, mecanico, estado_proceso FROM equipos_ingresados WHERE estado_proceso IN ('En Proceso de Inspección', 'Mantenimiento en Proceso', 'Checklist Salida en Proceso')", conn)
     if not df_incompletos.empty:
         st.warning("⚠️ Alerta: Existen Checklists guardados por la mitad")
         opciones_inc = {f"[{r['estado_proceso']}] {r['interno']} (ID: {r['id']})": r['id'] for _, r in df_incompletos.iterrows()}
-        seleccion_inc = st.selectbox("Seleccione la tarea para retomarla:", list(opciones_inc.keys()))
+        detalle_agenda = st.session_state.get("detalle_agenda")
+        ingreso_incompleto_agenda = (
+            detalle_agenda[1]
+            if detalle_agenda and detalle_agenda[0] == "mantenimiento"
+            else None
+        )
+        indice_incompleto_agenda = next(
+            (i for i, ingreso_id in enumerate(opciones_inc.values()) if ingreso_id == ingreso_incompleto_agenda),
+            0,
+        )
+        seleccion_inc = st.selectbox(
+            "Seleccione la tarea para retomarla:",
+            list(opciones_inc.keys()),
+            index=indice_incompleto_agenda,
+        )
         
         id_retomar = opciones_inc[seleccion_inc]
         estado_inc = df_incompletos[df_incompletos["id"] == id_retomar].iloc[0]["estado_proceso"]
@@ -958,7 +1269,17 @@ elif menu_elegido == "📊 Tablero de Equipos":
     else:
         st.dataframe(df_ingresos.style.map(colorear_estados, subset=['estado_proceso']), use_container_width=True, hide_index=True)
         opciones_select = {f"{r['interno']} - {r['marca']} {r['modelo']} (ID: {r['id']}) - {r['estado_proceso']}": r['id'] for _, r in df_ingresos.iterrows()}
-        seleccion_mante = st.selectbox("Seleccionar Unidad para ver acciones:", list(opciones_select.keys()))
+        detalle_agenda = st.session_state.get("detalle_agenda")
+        ingreso_agenda = detalle_agenda[1] if detalle_agenda and detalle_agenda[0] == "mantenimiento" else None
+        indice_ingreso_agenda = next(
+            (i for i, ingreso_id in enumerate(opciones_select.values()) if ingreso_id == ingreso_agenda),
+            0,
+        )
+        seleccion_mante = st.selectbox(
+            "Seleccionar Unidad para ver acciones:",
+            list(opciones_select.keys()),
+            index=indice_ingreso_agenda,
+        )
         
         if seleccion_mante:
             id_buscado = opciones_select[seleccion_mante]
@@ -1468,6 +1789,7 @@ elif menu_elegido == "🛒 Lista de Compras":
 # ==========================================
 elif menu_elegido == "💼 Trabajos Clientes":
     st.title("💼 Gestión de Trabajos en Clientes")
+    _mostrar_volver_a_agenda("cliente")
     conn = conectar_db()
     cursor = conn.cursor()
 
@@ -1498,7 +1820,10 @@ elif menu_elegido == "💼 Trabajos Clientes":
             st.info("No hay trabajos en clientes pendientes.")
         else:
             for _, row in df_t.iterrows():
-                with st.expander(f"📍 {row['cliente']} — Programado: {row['fecha_programada']}"):
+                with st.expander(
+                    f"📍 {row['cliente']} — Programado: {row['fecha_programada']}",
+                    expanded=st.session_state.get("detalle_agenda") == ("cliente", int(row["id"])),
+                ):
                     with st.form(f"form_edit_cliente_{row['id']}"):
                         edit_cliente = st.text_input("Nombre del Cliente:", value=row['cliente'])
                         edit_tarea = st.text_area("Detalle de la tarea:", value=row['tarea'])
