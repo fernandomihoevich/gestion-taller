@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import smtplib
+from zoneinfo import ZoneInfo
 from psycopg2 import Error as PsycopgError
 
 from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db, has_remote_db, IS_CLOUD
@@ -206,8 +207,70 @@ st.markdown("""
     hr {
         border-color: var(--taller-line);
     }
-</style>
-""", unsafe_allow_html=True)
+
+    .agenda-title {
+        font-size: 1.45rem;
+        line-height: 1.2;
+        margin: 0 0 0.45rem;
+    }
+
+    .agenda-day-heading {
+        font-size: 1rem;
+        line-height: 1.25;
+        margin: 0.2rem 0 0.35rem;
+    }
+
+    .agenda-day-heading.agenda-today {
+        color: #ff9a68;
+    }
+
+    .agenda-day-count {
+        color: var(--taller-muted);
+        font-size: 0.78rem;
+        font-weight: 400;
+    }
+
+    .st-key-agenda-desktop,
+    .st-key-agenda-tablet,
+    .st-key-agenda-mobile {
+        display: none !important;
+    }
+
+    .st-key-agenda-desktop [data-testid="stVerticalBlock"],
+    .st-key-agenda-tablet [data-testid="stVerticalBlock"],
+    .st-key-agenda-mobile [data-testid="stVerticalBlock"] {
+        gap: 0.45rem;
+    }
+
+    .st-key-agenda-desktop [data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-agenda-tablet [data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-agenda-mobile [data-testid="stVerticalBlockBorderWrapper"] {
+        padding: 0.55rem 0.65rem;
+    }
+
+    @media (min-width: 1200px) {
+        .st-key-agenda-desktop {
+            display: block !important;
+        }
+    }
+
+    @media (min-width: 701px) and (max-width: 1199px) {
+        .st-key-agenda-tablet {
+            display: block !important;
+        }
+    }
+
+    @media (max-width: 700px) {
+        .st-key-agenda-mobile {
+            display: block !important;
+        }
+
+        .st-key-agenda-mobile .stButton button {
+            min-height: 2.75rem;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- BASE DE DATOS Y ESTRUCTURA ---
 # En Streamlit Cloud el filesystem es efímero: requerimos DATABASE_URL para
@@ -661,12 +724,16 @@ def _nombre_dia(fecha):
     return dias[fecha.weekday()].capitalize()
 
 
-def _fecha_legible(fecha):
+def _nombre_mes(fecha):
     meses = (
         "enero", "febrero", "marzo", "abril", "mayo", "junio",
         "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
     )
-    return f"{fecha.day} de {meses[fecha.month - 1]} de {fecha.year}"
+    return meses[fecha.month - 1]
+
+
+def _fecha_legible(fecha):
+    return f"{fecha.day} de {_nombre_mes(fecha)} de {fecha.year}"
 
 
 def _ir_a_detalle_agenda(tipo, trabajo_id):
@@ -695,7 +762,14 @@ def _mostrar_volver_a_agenda(tipo):
         )
 
 
-def _mostrar_tarjeta_agenda(trabajo, atrasada=False):
+def _texto_agenda(valor):
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    return texto if texto else ""
+
+
+def _mostrar_tarjeta_agenda(trabajo, vista, hoy, atrasada=False, ancho_completo=False):
     etiquetas = {
         "interno": "🛠️ Interno",
         "cliente": "📍 Cliente",
@@ -708,37 +782,147 @@ def _mostrar_tarjeta_agenda(trabajo, atrasada=False):
         "mantenimiento": "Origen / destino",
     }
     with st.container(border=True):
-        st.markdown(f"**{etiqueta} · {trabajo['titulo']}**")
-        if trabajo["cliente"]:
-            st.caption(f"{etiquetas_ubicacion[trabajo['tipo']]}: {trabajo['cliente']}")
-        if trabajo["equipo"]:
-            st.caption(f"Equipo: {trabajo['equipo']}")
-        if trabajo["descripcion"]:
-            st.write(trabajo["descripcion"])
-        if trabajo.get("ultima_tarea"):
-            st.caption(
-                f"Última tarea registrada: {trabajo['ultima_tarea']} "
-                f"({trabajo['estado_ultima_tarea'] or 'estado no informado'})"
+        titulo = _texto_agenda(trabajo["titulo"]) or "Trabajo sin título"
+        st.markdown(f"**{etiqueta} · {titulo}**")
+        ubicacion = _texto_agenda(trabajo["cliente"])
+        equipo = _texto_agenda(trabajo["equipo"])
+        descripcion = _texto_agenda(trabajo["descripcion"])
+        contexto = []
+        if ubicacion:
+            contexto.append(f"{etiquetas_ubicacion[trabajo['tipo']]}: {ubicacion}")
+        if equipo:
+            contexto.append(f"Equipo: {equipo}")
+        if contexto:
+            st.caption(" · ".join(contexto))
+        if descripcion:
+            st.write(descripcion)
+        ultima_tarea = _texto_agenda(trabajo.get("ultima_tarea"))
+        if ultima_tarea:
+            estado_ultima_tarea = (
+                _texto_agenda(trabajo.get("estado_ultima_tarea")) or "estado no informado"
             )
+            st.caption(f"Última tarea: {ultima_tarea} ({estado_ultima_tarea})")
         detalles = [
             f"{trabajo['fecha_rotulo']}: {trabajo['fecha'].strftime('%d/%m/%Y')}",
-            f"Estado: {trabajo['estado'] or 'No informado'}",
+            f"Estado: {_texto_agenda(trabajo['estado']) or 'No informado'}",
         ]
-        if trabajo["responsable"]:
-            detalles.append(f"Responsable: {trabajo['responsable']}")
-        if trabajo["prioridad"]:
-            detalles.append(f"Prioridad: {trabajo['prioridad']}")
+        responsable = _texto_agenda(trabajo["responsable"])
+        prioridad = _texto_agenda(trabajo["prioridad"])
+        if responsable:
+            detalles.append(f"Responsable: {responsable}")
+        if prioridad:
+            detalles.append(f"Prioridad: {prioridad}")
         if atrasada:
-            dias_atraso = (date.today() - trabajo["fecha"]).days
+            dias_atraso = (hoy - trabajo["fecha"]).days
             detalles.append(f"Atraso: {dias_atraso} día(s)")
         st.caption(" · ".join(detalles))
         st.button(
             "Abrir detalle →",
-            key=f"agenda_{trabajo['tipo']}_{trabajo['id']}_{'atraso' if atrasada else 'semana'}",
+            key=(
+                f"agenda_{vista}_{trabajo['tipo']}_{trabajo['id']}_"
+                f"{'atraso' if atrasada else 'semana'}"
+            ),
             on_click=_ir_a_detalle_agenda,
             args=(trabajo["tipo"], trabajo["id"]),
+            use_container_width=ancho_completo,
+        )
+
+
+def _cambiar_semana(delta):
+    st.session_state.agenda_semana_offset += delta
+
+
+def _mostrar_controles_semana(lunes, viernes, hoy, vista):
+    col_anterior, col_rango, col_siguiente = st.columns([1.2, 3, 1.2], gap="small")
+    etiqueta_anterior = "← Ant." if vista == "mobile" else "← Semana anterior"
+    etiqueta_siguiente = "Sig. →" if vista == "mobile" else "Semana siguiente →"
+    with col_anterior:
+        st.button(
+            etiqueta_anterior,
+            key=f"agenda_anterior_{vista}",
+            on_click=_cambiar_semana,
+            args=(-1,),
             use_container_width=True,
         )
+    with col_rango:
+        if lunes.year == viernes.year and lunes.month == viernes.month:
+            rango = f"{lunes.day}–{viernes.day} de {_nombre_mes(viernes)} de {viernes.year}"
+        elif lunes.year == viernes.year:
+            rango = (
+                f"{lunes.day} de {_nombre_mes(lunes)} – "
+                f"{viernes.day} de {_nombre_mes(viernes)} de {viernes.year}"
+            )
+        else:
+            rango = (
+                f"{lunes.day} de {_nombre_mes(lunes)} de {lunes.year} – "
+                f"{viernes.day} de {_nombre_mes(viernes)} de {viernes.year}"
+            )
+        st.markdown(f"**{rango}**")
+        st.caption(f"Lunes a viernes · hoy: {_fecha_legible(hoy)}")
+    with col_siguiente:
+        st.button(
+            etiqueta_siguiente,
+            key=f"agenda_siguiente_{vista}",
+            on_click=_cambiar_semana,
+            args=(1,),
+            use_container_width=True,
+        )
+
+
+def _mostrar_dia_agenda(fecha, trabajos_dia, hoy, vista):
+    es_hoy = fecha == hoy
+    marcador_hoy = " · HOY" if es_hoy else ""
+    clases = "agenda-day-heading agenda-today" if es_hoy else "agenda-day-heading"
+    st.markdown(
+        f"<div class='{clases}'><strong>{_nombre_dia(fecha)} "
+        f"{fecha.strftime('%d/%m')}{marcador_hoy}</strong> "
+        f"<span class='agenda-day-count'>· {len(trabajos_dia)} pendientes</span></div>",
+        unsafe_allow_html=True,
+    )
+    if trabajos_dia:
+        for trabajo in trabajos_dia:
+            _mostrar_tarjeta_agenda(
+                trabajo,
+                vista,
+                hoy,
+                ancho_completo=(vista == "mobile"),
+            )
+    else:
+        st.caption("Sin trabajos pendientes.")
+
+
+def _mostrar_fin_de_semana(trabajos_fin_semana, lunes, hoy, vista):
+    nombre = "Fuera de la semana laboral"
+    with st.expander(
+        f"{nombre} · sábado y domingo ({len(trabajos_fin_semana)})",
+        expanded=bool(trabajos_fin_semana),
+    ):
+        if not trabajos_fin_semana:
+            st.caption("No hay trabajos pendientes programados para el fin de semana.")
+            return
+        sabado = lunes + timedelta(days=5)
+        domingo = lunes + timedelta(days=6)
+        for fecha_dia in (sabado, domingo):
+            trabajos_dia = [
+                trabajo for trabajo in trabajos_fin_semana if trabajo["fecha"] == fecha_dia
+            ]
+            _mostrar_dia_agenda(fecha_dia, trabajos_dia, hoy, vista)
+
+
+def _mostrar_atrasados(trabajos_atrasados, hoy, vista, ancho_completo=False):
+    st.subheader(f"⚠️ Atrasados · {len(trabajos_atrasados)}")
+    st.caption("Solo trabajos internos y de clientes en estado Pendiente.")
+    if trabajos_atrasados:
+        for trabajo in trabajos_atrasados:
+            _mostrar_tarjeta_agenda(
+                trabajo,
+                vista,
+                hoy,
+                atrasada=True,
+                ancho_completo=ancho_completo,
+            )
+    else:
+        st.success("No hay trabajos internos o de clientes atrasados.")
 
 
 def generar_reportes(ingreso_id, incluir_entrega=False):
@@ -936,7 +1120,7 @@ def colorear_estados(val):
 # 1. PANTALLA: AGENDA SEMANAL
 # ==========================================
 if menu_elegido == "🏠 Inicio semanal":
-    st.title("🏠 Agenda semanal del taller")
+    st.markdown("<h2 class='agenda-title'>🏠 Agenda semanal del taller</h2>", unsafe_allow_html=True)
     conn = conectar_db()
     try:
         trabajos_agenda, fechas_invalidas = _cargar_trabajos_agenda(conn)
@@ -945,26 +1129,11 @@ if menu_elegido == "🏠 Inicio semanal":
 
     if "agenda_semana_offset" not in st.session_state:
         st.session_state.agenda_semana_offset = 0
-    hoy = date.today()
+    hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
     lunes_actual = hoy - timedelta(days=hoy.weekday())
     lunes = lunes_actual + timedelta(weeks=st.session_state.agenda_semana_offset)
     viernes = lunes + timedelta(days=4)
     domingo = lunes + timedelta(days=6)
-
-    col_anterior, col_rango, col_siguiente = st.columns([1, 3, 1])
-    with col_anterior:
-        if st.button("← Semana anterior", key="agenda_semana_anterior", use_container_width=True):
-            st.session_state.agenda_semana_offset -= 1
-            st.rerun()
-    with col_rango:
-        st.markdown(
-            f"### {_fecha_legible(lunes)} — {_fecha_legible(viernes)}"
-            f"\n\nSemana de lunes a viernes · hoy: **{_fecha_legible(hoy)}**"
-        )
-    with col_siguiente:
-        if st.button("Semana siguiente →", key="agenda_semana_siguiente", use_container_width=True):
-            st.session_state.agenda_semana_offset += 1
-            st.rerun()
 
     trabajos_semana = [trabajo for trabajo in trabajos_agenda if lunes <= trabajo["fecha"] <= viernes]
     trabajos_fin_semana = [trabajo for trabajo in trabajos_agenda if viernes < trabajo["fecha"] <= domingo]
@@ -973,47 +1142,66 @@ if menu_elegido == "🏠 Inicio semanal":
         if trabajo["tipo"] in {"interno", "cliente"} and trabajo["fecha"] < hoy
     ]
 
-    col_agenda, col_atrasados = st.columns([3, 1], gap="large")
-    with col_agenda:
-        st.subheader("Agenda de lunes a viernes")
-        for numero_dia in range(5):
-            fecha_dia = lunes + timedelta(days=numero_dia)
-            trabajos_dia = [trabajo for trabajo in trabajos_semana if trabajo["fecha"] == fecha_dia]
-            marca_hoy = " · HOY" if fecha_dia == hoy else ""
-            st.markdown(f"### {_nombre_dia(fecha_dia)} {fecha_dia.strftime('%d/%m')}{marca_hoy}")
-            if fecha_dia == hoy:
-                st.markdown(
-                    "<div style='height:3px;background:#e76f32;border-radius:3px;margin:-0.5rem 0 0.75rem'></div>",
-                    unsafe_allow_html=True,
-                )
-            if trabajos_dia:
-                for trabajo in trabajos_dia:
-                    _mostrar_tarjeta_agenda(trabajo)
-            else:
-                st.caption("Sin trabajos pendientes para este día.")
+    dias_semana = [
+        (
+            lunes + timedelta(days=numero_dia),
+            [
+                trabajo for trabajo in trabajos_semana
+                if trabajo["fecha"] == lunes + timedelta(days=numero_dia)
+            ],
+        )
+        for numero_dia in range(5)
+    ]
 
-        with st.expander(
-            f"Fuera de la semana laboral · sábado y domingo ({len(trabajos_fin_semana)})",
-            expanded=bool(trabajos_fin_semana),
-        ):
-            if trabajos_fin_semana:
-                for fecha_dia in (viernes + timedelta(days=1), domingo):
-                    trabajos_dia = [trabajo for trabajo in trabajos_fin_semana if trabajo["fecha"] == fecha_dia]
-                    st.markdown(f"### {_nombre_dia(fecha_dia)} {fecha_dia.strftime('%d/%m')}")
-                    for trabajo in trabajos_dia:
-                        _mostrar_tarjeta_agenda(trabajo)
-            else:
-                st.caption("No hay trabajos pendientes programados para el fin de semana.")
+    with st.container(key="agenda-desktop"):
+        _mostrar_controles_semana(lunes, viernes, hoy, "desktop")
+        col_agenda, col_atrasados = st.columns([5, 1.6], gap="small")
+        with col_agenda:
+            st.caption("Agenda de lunes a viernes")
+            columnas_dias = st.columns(5, gap="small")
+            for columna, (fecha_dia, trabajos_dia) in zip(columnas_dias, dias_semana):
+                with columna:
+                    _mostrar_dia_agenda(fecha_dia, trabajos_dia, hoy, "desktop")
+            _mostrar_fin_de_semana(trabajos_fin_semana, lunes, hoy, "desktop")
+        with col_atrasados:
+            _mostrar_atrasados(trabajos_atrasados, hoy, "desktop")
 
-    with col_atrasados:
-        st.subheader(f"⚠️ Atrasados · {len(trabajos_atrasados)}")
-        st.caption("Solo se consideran trabajos internos y de clientes en estado Pendiente.")
-        st.caption("Los ingresos técnicos no se clasifican como atrasados: solo tienen fecha de ingreso, no turno programado.")
-        if trabajos_atrasados:
-            for trabajo in trabajos_atrasados:
-                _mostrar_tarjeta_agenda(trabajo, atrasada=True)
-        else:
-            st.success("No hay trabajos internos o de clientes atrasados.")
+    with st.container(key="agenda-tablet"):
+        _mostrar_controles_semana(lunes, viernes, hoy, "tablet")
+        col_agenda, col_atrasados = st.columns([3, 1.35], gap="small")
+        with col_agenda:
+            st.caption("Agenda de lunes a viernes")
+            for indice in range(0, 5, 2):
+                columnas_dias = st.columns(2, gap="small")
+                for columna, numero_dia in zip(columnas_dias, (indice, indice + 1)):
+                    if numero_dia < len(dias_semana):
+                        with columna:
+                            fecha_dia, trabajos_dia = dias_semana[numero_dia]
+                            _mostrar_dia_agenda(fecha_dia, trabajos_dia, hoy, "tablet")
+            _mostrar_fin_de_semana(trabajos_fin_semana, lunes, hoy, "tablet")
+        with col_atrasados:
+            _mostrar_atrasados(trabajos_atrasados, hoy, "tablet")
+
+    with st.container(key="agenda-mobile"):
+        _mostrar_controles_semana(lunes, viernes, hoy, "mobile")
+        with st.expander(f"⚠️ Ver atrasados · {len(trabajos_atrasados)}", expanded=False):
+            st.caption("Los ingresos técnicos no se clasifican como atrasados: solo tienen fecha de ingreso, no turno programado.")
+            _mostrar_atrasados(trabajos_atrasados, hoy, "mobile", ancho_completo=True)
+
+        opciones_dia = list(range(5))
+        indice_dia = st.selectbox(
+            "Día de la semana",
+            opciones_dia,
+            format_func=lambda indice: (
+                f"{_nombre_dia(dias_semana[indice][0])} · "
+                f"{len(dias_semana[indice][1])} pendientes"
+            ),
+            key="agenda_dia_movil",
+            label_visibility="collapsed",
+        )
+        fecha_dia, trabajos_dia = dias_semana[indice_dia]
+        _mostrar_dia_agenda(fecha_dia, trabajos_dia, hoy, "mobile")
+        _mostrar_fin_de_semana(trabajos_fin_semana, lunes, hoy, "mobile")
 
     if fechas_invalidas:
         st.info(
