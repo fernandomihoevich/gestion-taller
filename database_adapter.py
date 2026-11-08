@@ -7,7 +7,8 @@ import os
 import shutil
 import sqlite3
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -228,6 +229,74 @@ def _has_remote_db():
     if _import_psycopg2() is None:
         return False
     return bool(_get_database_url())
+
+
+def _fecha_fin_mantenimiento(fecha_inicio):
+    fecha = fecha_inicio
+    dias_habiles = 0
+    while dias_habiles < 5:
+        fecha += timedelta(days=1)
+        if fecha.weekday() < 5:
+            dias_habiles += 1
+    return fecha
+
+
+def _migrar_fechas_mantenimiento(cursor, is_postgresql):
+    columnas = ("fecha_inicio_mantenimiento", "fecha_fin_estimada")
+    marcador = "%s" if is_postgresql else "?"
+    if is_postgresql:
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            f"WHERE table_name = {marcador} AND column_name IN ({marcador}, {marcador})",
+            ("equipos_ingresados", *columnas),
+        )
+        existentes = {fila[0] for fila in cursor.fetchall()}
+    else:
+        cursor.execute("PRAGMA table_info(equipos_ingresados)")
+        existentes = {fila[1] for fila in cursor.fetchall()}
+
+    for columna in columnas:
+        if columna not in existentes:
+            cursor.execute(f"ALTER TABLE equipos_ingresados ADD COLUMN {columna} TEXT")
+
+    hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+    cursor.execute(
+        "SELECT id, fecha_inicio_mantenimiento, fecha_fin_estimada "
+        "FROM equipos_ingresados WHERE estado_proceso = 'Mantenimiento en Proceso'"
+    )
+    for ingreso_id, fecha_inicio, fecha_fin in cursor.fetchall():
+        if not fecha_inicio:
+            fecha_inicio = hoy
+            fecha_inicio_calculo = hoy
+        else:
+            try:
+                fecha_inicio_calculo = datetime.strptime(
+                    str(fecha_inicio),
+                    "%Y-%m-%d",
+                ).date()
+            except ValueError:
+                try:
+                    fecha_inicio_calculo = datetime.strptime(
+                        str(fecha_inicio),
+                        "%d/%m/%Y",
+                    ).date()
+                except ValueError:
+                    fecha_inicio_calculo = hoy
+        if isinstance(fecha_inicio, datetime):
+            fecha_inicio = fecha_inicio.date()
+        if isinstance(fecha_inicio, date):
+            fecha_inicio = fecha_inicio.isoformat()
+        if not fecha_fin:
+            fecha_fin = _fecha_fin_mantenimiento(fecha_inicio_calculo).isoformat()
+        cursor.execute(
+            "UPDATE equipos_ingresados SET fecha_inicio_mantenimiento = "
+            f"{marcador}, fecha_fin_estimada = {marcador} WHERE id = {marcador}",
+            (
+                fecha_inicio,
+                fecha_fin,
+                ingreso_id,
+            ),
+        )
 
 
 def _remote_db_is_empty(db_url=None):
@@ -650,6 +719,8 @@ def inicializar_db(conn):
             except psycopg2.Error as e:
                 if 'already exists' not in str(e):
                     print(f"⚠️ Error creando tabla: {e}")
+
+        _migrar_fechas_mantenimiento(cursor, is_postgresql=True)
         
         # Insertar datos iniciales
         cursor.execute("SELECT COUNT(*) FROM mecanicos")
@@ -784,6 +855,8 @@ def inicializar_db(conn):
                 cursor.execute(sql)
             except Exception as e:
                 print(f"⚠️ Error creando tabla SQLite: {e}")
+
+        _migrar_fechas_mantenimiento(cursor, is_postgresql=False)
 
         cursor.execute("SELECT COUNT(*) FROM mecanicos")
         if cursor.fetchone()[0] == 0:

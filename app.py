@@ -236,6 +236,11 @@ st.markdown("""
         display: none !important;
     }
 
+    .st-key-ingresos-desktop,
+    .st-key-ingresos-mobile {
+        display: none !important;
+    }
+
     .st-key-agenda-desktop [data-testid="stVerticalBlock"],
     .st-key-agenda-tablet [data-testid="stVerticalBlock"],
     .st-key-agenda-mobile [data-testid="stVerticalBlock"] {
@@ -252,10 +257,18 @@ st.markdown("""
         .st-key-agenda-desktop {
             display: block !important;
         }
+
+        .st-key-ingresos-desktop {
+            display: block !important;
+        }
     }
 
     @media (min-width: 701px) and (max-width: 1199px) {
         .st-key-agenda-tablet {
+            display: block !important;
+        }
+
+        .st-key-ingresos-desktop {
             display: block !important;
         }
     }
@@ -270,6 +283,7 @@ st.markdown("""
         }
 
         .st-key-ingreso-checklist [data-testid="stHorizontalBlock"],
+        .st-key-mantenimiento-checklist [data-testid="stHorizontalBlock"],
         .st-key-salida-checklist [data-testid="stHorizontalBlock"] {
             flex-direction: column;
             align-items: stretch;
@@ -277,29 +291,42 @@ st.markdown("""
         }
 
         .st-key-ingreso-checklist [data-testid="stColumn"],
+        .st-key-mantenimiento-checklist [data-testid="stColumn"],
         .st-key-salida-checklist [data-testid="stColumn"] {
             width: 100% !important;
             flex: 1 1 100% !important;
         }
 
         .st-key-ingreso-checklist input[type="checkbox"],
+        .st-key-mantenimiento-checklist input[type="checkbox"],
         .st-key-salida-checklist input[type="checkbox"] {
             transform: scale(1.2);
         }
 
         .st-key-ingreso-checklist [data-testid="stCheckbox"] label,
+        .st-key-mantenimiento-checklist [data-testid="stCheckbox"] label,
         .st-key-salida-checklist [data-testid="stCheckbox"] label {
             min-height: 2.75rem;
             align-items: center;
         }
+
+        .st-key-ingresos-desktop {
+            display: none !important;
+        }
+
+        .st-key-ingresos-mobile {
+            display: block !important;
+        }
     }
 
     .st-key-ingreso-checklist [data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-mantenimiento-checklist [data-testid="stVerticalBlockBorderWrapper"],
     .st-key-salida-checklist [data-testid="stVerticalBlockBorderWrapper"] {
         padding: 0.35rem 0.55rem;
     }
 
     .st-key-ingreso-checklist [data-testid="stVerticalBlock"],
+    .st-key-mantenimiento-checklist [data-testid="stVerticalBlock"],
     .st-key-salida-checklist [data-testid="stVerticalBlock"] {
         gap: 0.35rem;
     }
@@ -647,9 +674,27 @@ _ESTADOS_CHECKLIST = {
     "controles_ingreso": ("OK", "Malo", "No Realizado"),
     "controles_salida": ("OK", "Malo (Avisar a Taller)", "No Aplica"),
 }
+_ESTADOS_MANTENIMIENTO = {
+    "mantenimiento": ("Realizado", "No Necesario", "Postergado"),
+    "reparacion": ("Reparado", "No Reparado"),
+}
 
 
 def _cargar_respuestas_checklist(conn, tabla, ingreso_id):
+    if tabla == "controles_mantenimiento":
+        filas = conn.execute(
+            "SELECT tarea, estado, observaciones, tipo_tarea "
+            "FROM controles_mantenimiento WHERE ingreso_id = ? ORDER BY id",
+            (ingreso_id,),
+        ).fetchall()
+        return {
+            fila[0]: {
+                "estado": fila[1],
+                "observaciones": fila[2] or "",
+                "tipo_tarea": fila[3],
+            }
+            for fila in filas
+        }
     if tabla not in _ESTADOS_CHECKLIST:
         raise ValueError(f"Tabla de checklist no válida: {tabla}")
     filas = conn.execute(
@@ -663,6 +708,15 @@ def _cargar_respuestas_checklist(conn, tabla, ingreso_id):
 
 
 def _contar_checklist_completados(descripciones, respuestas, tabla):
+    if tabla == "controles_mantenimiento":
+        return sum(
+            1
+            for tarea, tipo_tarea in descripciones
+            if tarea in respuestas
+            and respuestas[tarea]["estado"]
+            in _ESTADOS_MANTENIMIENTO.get(tipo_tarea, ())
+            and respuestas[tarea]["estado"] != "Postergado"
+        )
     estados_validos = _ESTADOS_CHECKLIST.get(tabla)
     if estados_validos is None:
         raise ValueError(f"Tabla de checklist no válida: {tabla}")
@@ -682,46 +736,63 @@ def _persistir_respuesta_checklist(
     estado_key,
     observaciones_key,
     error_key,
+    tipo_tarea=None,
 ):
-    estados_validos = _ESTADOS_CHECKLIST.get(tabla)
+    estados_validos = (
+        _ESTADOS_MANTENIMIENTO.get(tipo_tarea, ())
+        if tabla == "controles_mantenimiento"
+        else _ESTADOS_CHECKLIST.get(tabla)
+    )
     if estados_validos is None:
         raise ValueError(f"Tabla de checklist no válida: {tabla}")
 
     conn = conectar_db()
     try:
-        if not st.session_state[completado_key]:
-            conn.execute(
-                f"DELETE FROM {tabla} WHERE ingreso_id = ? AND tarea = ?",
-                (ingreso_id, tarea),
-            )
-            conn.commit()
-            persistir_y_sync()
-            st.session_state[estado_key] = None
-            st.session_state[observaciones_key] = ""
-            st.session_state.checklist_guardado = (
-                "success",
-                "Paso desmarcado y guardado.",
-            )
-            st.session_state.pop(error_key, None)
+        estado = st.session_state.get(estado_key)
+        es_postergada = tabla == "controles_mantenimiento" and estado == "Postergado"
+        if not st.session_state[completado_key] and not es_postergada:
             return
 
-        estado = st.session_state.get(estado_key)
         if estado not in estados_validos:
             st.session_state[error_key] = (
                 "Seleccioná una condición antes de marcar el paso como completo."
             )
             return
+        if estado == "Postergado" and tabla == "controles_mantenimiento":
+            st.session_state[completado_key] = False
 
         observaciones = (st.session_state.get(observaciones_key) or "").strip()
-        respuesta = conn.execute(
-            f"SELECT id FROM {tabla} WHERE ingreso_id = ? AND tarea = ? ORDER BY id DESC LIMIT 1",
-            (ingreso_id, tarea),
-        ).fetchone()
+        if tabla == "controles_mantenimiento":
+            respuesta = conn.execute(
+                "SELECT id FROM controles_mantenimiento "
+                "WHERE ingreso_id = ? AND tarea = ? ORDER BY id DESC LIMIT 1",
+                (ingreso_id, tarea),
+            ).fetchone()
+        else:
+            respuesta = conn.execute(
+                f"SELECT id FROM {tabla} WHERE ingreso_id = ? AND tarea = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (ingreso_id, tarea),
+            ).fetchone()
         if respuesta:
+            if tabla == "controles_mantenimiento":
+                conn.execute(
+                    "UPDATE controles_mantenimiento SET estado = ?, observaciones = ?, "
+                    "tipo_tarea = ? WHERE id = ?",
+                    (estado, observaciones, tipo_tarea, respuesta[0]),
+                )
+            else:
+                conn.execute(
+                    f"UPDATE {tabla} SET estado = ?, observaciones = ? "
+                    "WHERE id = ?",
+                    (estado, observaciones, respuesta[0]),
+                )
+        elif tabla == "controles_mantenimiento":
             conn.execute(
-                f"UPDATE {tabla} SET estado = ?, observaciones = ? "
-                "WHERE ingreso_id = ? AND tarea = ?",
-                (estado, observaciones, ingreso_id, tarea),
+                "INSERT INTO controles_mantenimiento "
+                "(ingreso_id, tarea, estado, observaciones, tipo_tarea) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ingreso_id, tarea, estado, observaciones, tipo_tarea),
             )
         else:
             conn.execute(
@@ -733,7 +804,11 @@ def _persistir_respuesta_checklist(
         persistir_y_sync()
         st.session_state.checklist_guardado = (
             "success",
-            "Cambios guardados automáticamente.",
+            (
+                "Paso postergado y guardado."
+                if es_postergada
+                else "Cambios guardados automáticamente."
+            ),
         )
         st.session_state.pop(error_key, None)
     finally:
@@ -748,8 +823,12 @@ def _guardar_estado_checklist(
     estado_key,
     observaciones_key,
     error_key,
+    tipo_tarea=None,
 ):
-    st.session_state[completado_key] = True
+    estado = st.session_state.get(estado_key)
+    st.session_state[completado_key] = not (
+        tabla == "controles_mantenimiento" and estado == "Postergado"
+    )
     _persistir_respuesta_checklist(
         tabla,
         ingreso_id,
@@ -758,6 +837,7 @@ def _guardar_estado_checklist(
         estado_key,
         observaciones_key,
         error_key,
+        tipo_tarea,
     )
 
 
@@ -769,6 +849,7 @@ def _guardar_observaciones_checklist(
     estado_key,
     observaciones_key,
     error_key,
+    tipo_tarea=None,
 ):
     if st.session_state[completado_key]:
         _persistir_respuesta_checklist(
@@ -779,22 +860,35 @@ def _guardar_observaciones_checklist(
             estado_key,
             observaciones_key,
             error_key,
+            tipo_tarea,
         )
 
 
 def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
     tabla = {
         "ingreso": "controles_ingreso",
+        "mantenimiento": "controles_mantenimiento",
         "salida": "controles_salida",
     }[tipo]
-    estados = _ESTADOS_CHECKLIST[tabla]
+    estados_base = (
+        _ESTADOS_CHECKLIST.get(tabla)
+        or _ESTADOS_MANTENIMIENTO.get("mantenimiento")
+    )
     progreso = _contar_checklist_completados(
-        [tarea for _, tarea, _ in controles],
+        [
+            (tarea, grupo) if tipo == "mantenimiento" else tarea
+            for _, tarea, grupo in controles
+        ],
         respuestas,
         tabla,
     )
     total = len(controles)
-    titulo = "Checklist de ingreso" if tipo == "ingreso" else "Checklist de salida"
+    titulos = {
+        "ingreso": "Checklist de ingreso",
+        "mantenimiento": "Checklist de mantenimiento",
+        "salida": "Checklist de salida",
+    }
+    titulo = titulos[tipo]
 
     with st.container(key=f"{tipo}-checklist"):
         st.subheader(titulo)
@@ -809,7 +903,23 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
             nivel, mensaje = mensaje_guardado
             (st.success if nivel == "success" else st.warning)(mensaje)
 
-        for indice, (control_id, tarea, _) in enumerate(controles, start=1):
+        grupo_actual = None
+        for indice, (control_id, tarea, grupo) in enumerate(controles, start=1):
+            estados = (
+                _ESTADOS_MANTENIMIENTO.get(grupo, ())
+                if tipo == "mantenimiento"
+                else estados_base
+            )
+            if tipo == "mantenimiento" and grupo != grupo_actual:
+                st.markdown(
+                    "### "
+                    + (
+                        "Rutina de mantenimiento"
+                        if grupo == "mantenimiento"
+                        else "Reparaciones detectadas en el ingreso"
+                    )
+                )
+                grupo_actual = grupo
             respuesta = respuestas.get(tarea)
             prefijo = f"checklist_{tipo}_{ingreso_id}_{control_id}"
             completado_key = f"{prefijo}_completado"
@@ -817,7 +927,11 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
             observaciones_key = f"{prefijo}_observaciones"
             error_key = f"{prefijo}_error"
             if completado_key not in st.session_state:
-                st.session_state[completado_key] = bool(respuesta)
+                st.session_state[completado_key] = bool(
+                    respuesta
+                    and respuesta["estado"] in estados
+                    and respuesta["estado"] != "Postergado"
+                )
             if estado_key not in st.session_state:
                 estado_guardado = respuesta["estado"] if respuesta else None
                 st.session_state[estado_key] = (
@@ -836,6 +950,7 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
                 estado_key,
                 observaciones_key,
                 error_key,
+                grupo if tipo == "mantenimiento" else None,
             )
             with st.container(border=True):
                 col_estado, col_tarea, col_respuesta, col_observaciones = st.columns(
@@ -848,6 +963,10 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
                         key=completado_key,
                         on_change=_persistir_respuesta_checklist,
                         args=argumentos,
+                        disabled=bool(
+                            respuesta
+                            and st.session_state[completado_key]
+                        ),
                     )
                 with col_tarea:
                     st.markdown(f"**{indice}. {tarea}**")
@@ -965,7 +1084,7 @@ def _cargar_trabajos_agenda(conn):
 
     mantenimientos = pd.read_sql_query("""
         SELECT e.id, e.interno, e.origen, e.mecanico, e.fecha_ingreso,
-               e.estado_proceso, m.marca, m.modelo,
+               e.fecha_fin_estimada, e.estado_proceso, m.marca, m.modelo,
                (SELECT cm.tarea FROM controles_mantenimiento cm
                 WHERE cm.ingreso_id = e.id ORDER BY cm.id DESC LIMIT 1) AS ultima_tarea,
                (SELECT cm.estado FROM controles_mantenimiento cm
@@ -981,7 +1100,13 @@ def _cargar_trabajos_agenda(conn):
         ORDER BY e.fecha_ingreso, e.id
     """, conn)
     for _, fila in mantenimientos.iterrows():
-        fecha = _fecha_agenda(fila["fecha_ingreso"])
+        es_mantenimiento_activo = fila["estado_proceso"] == "Mantenimiento en Proceso"
+        valor_fecha = (
+            fila["fecha_fin_estimada"]
+            if es_mantenimiento_activo
+            else fila["fecha_ingreso"]
+        )
+        fecha = _fecha_agenda(valor_fecha)
         if fecha is None:
             fechas_invalidas += 1
             continue
@@ -989,7 +1114,11 @@ def _cargar_trabajos_agenda(conn):
             "tipo": "mantenimiento",
             "id": int(fila["id"]),
             "fecha": fecha,
-            "fecha_rotulo": "Fecha de ingreso (sin turno programado)",
+            "fecha_rotulo": (
+                "Fin estimado"
+                if es_mantenimiento_activo
+                else "Fecha de ingreso (sin turno programado)"
+            ),
             "titulo": f"Unidad {fila['interno']}",
             "descripcion": f"{fila['estado_proceso']}",
             "ultima_tarea": fila["ultima_tarea"],
@@ -1197,7 +1326,10 @@ def _mostrar_fin_de_semana(trabajos_fin_semana, lunes, hoy, vista):
 
 def _mostrar_atrasados(trabajos_atrasados, hoy, vista, ancho_completo=False):
     st.subheader(f"⚠️ Atrasados · {len(trabajos_atrasados)}")
-    st.caption("Solo trabajos internos y de clientes en estado Pendiente.")
+    st.caption(
+        "Trabajos internos y de clientes pendientes, más mantenimientos que superaron "
+        "su fin estimado y continúan en proceso."
+    )
     if trabajos_atrasados:
         for trabajo in trabajos_atrasados:
             _mostrar_tarjeta_agenda(
@@ -1246,50 +1378,84 @@ def mostrar_descargas_pdf(ingreso_id):
         )
 
 
-def preparar_mantenimiento(ingreso_id, reabrir=False):
+def _fecha_fin_mantenimiento(fecha_inicio):
+    fecha = fecha_inicio
+    dias_habiles = 0
+    while dias_habiles < 5:
+        fecha += timedelta(days=1)
+        if fecha.weekday() < 5:
+            dias_habiles += 1
+    return fecha
+
+
+def _cargar_plan_mantenimiento(conn, ingreso_id):
+    tareas = conn.execute(
+        "SELECT id, descripcion FROM maestro_tareas_mantenimiento ORDER BY orden, id"
+    ).fetchall()
+    plan = [
+        {
+            "control_id": f"mantenimiento_{fila[0]}",
+            "tipo": "mantenimiento",
+            "tarea": fila[1],
+        }
+        for fila in tareas
+    ]
+    fallas = conn.execute(
+        "SELECT id, tarea, observaciones FROM controles_ingreso "
+        "WHERE ingreso_id = ? AND estado = 'Malo' ORDER BY id",
+        (ingreso_id,),
+    ).fetchall()
+    plan.extend(
+        {
+            "control_id": f"reparacion_{falla[0]}",
+            "tipo": "reparacion",
+            "tarea": f"[{falla[1]}] {falla[2] or ''}",
+        }
+        for falla in fallas
+    )
+    return plan
+
+
+def preparar_mantenimiento(ingreso_id):
     conn = conectar_db()
     try:
-        tareas_df = pd.read_sql_query(
-            "SELECT descripcion FROM maestro_tareas_mantenimiento ORDER BY orden ASC",
-            conn,
-        )
-        cola_completa = [
-            {"tipo": "mantenimiento", "tarea": tarea}
-            for tarea in tareas_df["descripcion"].tolist()
-        ]
-        fallas_df = pd.read_sql_query(
-            "SELECT tarea, observaciones FROM controles_ingreso WHERE ingreso_id = ? AND estado = 'Malo'",
-            conn,
-            params=(ingreso_id,),
-        )
-        for _, falla in fallas_df.iterrows():
-            cola_completa.append({
-                "tipo": "reparacion",
-                "tarea": f"[{falla['tarea']}] {falla['observaciones'] or ''}",
-            })
-
-        hechas_df = pd.read_sql_query(
-            "SELECT tarea FROM controles_mantenimiento WHERE ingreso_id = ?",
-            conn,
-            params=(ingreso_id,),
-        )
-        hechas = set(hechas_df["tarea"].tolist())
-        pendientes = [item for item in cola_completa if item["tarea"] not in hechas]
-
-        if pendientes:
-            st.session_state.mant_queue = pendientes
-            st.session_state.mant_idx = 0
-        else:
-            st.session_state.mant_queue = cola_completa or [{"tipo": "mantenimiento", "tarea": "Sin tareas pendientes"}]
-            st.session_state.mant_idx = len(st.session_state.mant_queue)
-
-        st.session_state.mant_ingreso_id = ingreso_id
-        st.session_state.hallazgos_extras_ok = False
-        conn.execute(
-            "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso' WHERE id = ?",
+        ingreso = conn.execute(
+            "SELECT estado_proceso, fecha_inicio_mantenimiento, fecha_fin_estimada "
+            "FROM equipos_ingresados WHERE id = ?",
             (ingreso_id,),
+        ).fetchone()
+        if not ingreso:
+            st.session_state.mensaje_mantenimiento = "No se encontró el ingreso seleccionado."
+            return
+
+        ahora = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+        fecha_inicio = ingreso[1]
+        fecha_fin = ingreso[2]
+        if not fecha_inicio:
+            fecha_inicio = ahora.isoformat()
+        else:
+            fecha_inicio = _fecha_agenda(fecha_inicio)
+            if fecha_inicio is None:
+                fecha_inicio = ahora
+            fecha_inicio = fecha_inicio.isoformat()
+        if not fecha_fin:
+            fecha_fin = _fecha_fin_mantenimiento(
+                datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+            ).isoformat()
+
+        conn.execute(
+            "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento en Proceso', "
+            "fecha_inicio_mantenimiento = ?, fecha_fin_estimada = ? WHERE id = ?",
+            (fecha_inicio, fecha_fin, ingreso_id),
         )
         conn.commit()
+        persistir_y_sync()
+
+        st.session_state.mant_queue = _cargar_plan_mantenimiento(conn, ingreso_id)
+        st.session_state.mant_idx = 0
+        st.session_state.mant_ingreso_id = ingreso_id
+        st.session_state.hallazgos_extras_ok = False
+        st.session_state.mensaje_mantenimiento = ""
         cambiar_pagina("🛠️ Ejecución de Mantenimiento")
     finally:
         conn.close()
@@ -1417,68 +1583,103 @@ def pausar_mantenimiento():
     cambiar_pagina("📊 Tablero de Equipos")
 
 
-def guardar_paso_mantenimiento():
-    ingreso_id = st.session_state.mant_ingreso_id
-    cola = st.session_state.mant_queue
-    indice = st.session_state.mant_idx
-    st.session_state.mensaje_mantenimiento = ""
+def guardar_hallazgos_mantenimiento(ingreso_id, observaciones_key):
     conn = conectar_db()
     try:
         estado_actual = conn.execute(
             "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
             (ingreso_id,),
         ).fetchone()
-        if not estado_actual or estado_actual[0] == "Mantenimiento Completado":
+        if not estado_actual or estado_actual[0] != "Mantenimiento en Proceso":
             return
-
-        if indice < len(cola):
-            item = cola[indice]
-            accion = st.session_state.get(f"resultado_mantenimiento_{ingreso_id}")
-            notas = st.session_state.get(f"notas_mantenimiento_{ingreso_id}", "")
-            resultados_validos = (
-                {"Realizado", "No Necesario", "Postergado"}
-                if item["tipo"] == "mantenimiento"
-                else {"Reparado", "No Reparado"}
-            )
-            if accion not in resultados_validos:
-                st.session_state.mensaje_mantenimiento = "Seleccioná un resultado válido para esta operación."
-                return
-            if accion == "Postergado":
-                cola.append(item)
-            else:
-                conn.execute(
-                    "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
-                    (ingreso_id, item["tarea"], accion, notas.strip(), item["tipo"]),
-                )
-                conn.commit()
-            st.session_state.mant_idx = indice + 1
-        else:
-            notas = st.session_state.get(f"notas_mantenimiento_{ingreso_id}", "")
-            if notas.strip():
-                conn.execute(
-                    "INSERT INTO controles_mantenimiento (ingreso_id, tarea, estado, observaciones, tipo_tarea) VALUES (?, ?, ?, ?, ?)",
-                    (ingreso_id, "Reparación Adicional en proceso", "Reparado", notas.strip(), "reparacion"),
-                )
+        observaciones = (st.session_state.get(observaciones_key) or "").strip()
+        existente = conn.execute(
+            "SELECT id FROM controles_mantenimiento WHERE ingreso_id = ? "
+            "AND tarea = 'Reparación Adicional en proceso' ORDER BY id DESC LIMIT 1",
+            (ingreso_id,),
+        ).fetchone()
+        if existente:
             conn.execute(
-                "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' WHERE id = ?",
-                (ingreso_id,),
+                "UPDATE controles_mantenimiento SET observaciones = ?, estado = 'Reparado', "
+                "tipo_tarea = 'reparacion' WHERE id = ?",
+                (observaciones, existente[0]),
             )
-            conn.commit()
-            st.session_state.hallazgos_extras_ok = True
-            try:
-                st.session_state[f"pdfs_generados_{ingreso_id}"] = [
-                    generar_pdf_taller(ingreso_id)
-                ]
-            except PdfGenerationError as exc:
-                st.session_state[f"pdfs_generados_{ingreso_id}"] = []
-                st.session_state.mensaje_mantenimiento = (
-                    f"Mantenimiento completado, pero no se pudo generar el PDF: {exc}"
-                )
-
-        st.session_state[f"resultado_mantenimiento_{ingreso_id}"] = None
-        st.session_state[f"notas_mantenimiento_{ingreso_id}"] = ""
+        elif observaciones:
+            conn.execute(
+                "INSERT INTO controles_mantenimiento "
+                "(ingreso_id, tarea, estado, observaciones, tipo_tarea) "
+                "VALUES (?, 'Reparación Adicional en proceso', 'Reparado', ?, 'reparacion')",
+                (ingreso_id, observaciones),
+            )
+        conn.commit()
+        persistir_y_sync()
+        st.session_state.mensaje_mantenimiento = "Hallazgos guardados automáticamente."
     finally:
         conn.close()
+
+
+def finalizar_mantenimiento(ingreso_id):
+    st.session_state.mensaje_mantenimiento = ""
+    conn = conectar_db()
+    try:
+        ingreso = conn.execute(
+            "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+            (ingreso_id,),
+        ).fetchone()
+        if not ingreso or ingreso[0] != "Mantenimiento en Proceso":
+            st.session_state.mensaje_mantenimiento = (
+                "El equipo ya no tiene un mantenimiento activo."
+            )
+            return
+
+        plan = _cargar_plan_mantenimiento(conn, ingreso_id)
+        respuestas = _cargar_respuestas_checklist(
+            conn,
+            "controles_mantenimiento",
+            ingreso_id,
+        )
+        progreso = _contar_checklist_completados(
+            [(item["tarea"], item["tipo"]) for item in plan],
+            respuestas,
+            "controles_mantenimiento",
+        )
+        if not plan:
+            st.session_state.mensaje_mantenimiento = (
+                "No hay pasos configurados para este mantenimiento; no se puede finalizar."
+            )
+            return
+        if progreso < len(plan):
+            st.session_state.mensaje_mantenimiento = (
+                f"Completá todos los pasos obligatorios antes de finalizar "
+                f"({progreso} de {len(plan)})."
+            )
+            return
+
+        actualizacion = conn.execute(
+            "UPDATE equipos_ingresados SET estado_proceso = 'Mantenimiento Completado' "
+            "WHERE id = ? AND estado_proceso = 'Mantenimiento en Proceso'",
+            (ingreso_id,),
+        )
+        if actualizacion.rowcount != 1:
+            st.session_state.mensaje_mantenimiento = (
+                "El estado del equipo cambió; actualizá la pantalla e intentá nuevamente."
+            )
+            return
+        conn.commit()
+        persistir_y_sync()
+    finally:
+        conn.close()
+
+    st.session_state.hallazgos_extras_ok = True
+    try:
+        st.session_state[f"pdfs_generados_{ingreso_id}"] = [
+            generar_pdf_taller(ingreso_id)
+        ]
+    except PdfGenerationError as exc:
+        st.session_state[f"pdfs_generados_{ingreso_id}"] = []
+        st.session_state.mensaje_mantenimiento = (
+            f"Mantenimiento completado, pero no se pudo generar el PDF: {exc}"
+        )
 
 
 def avanzar_paso_ingreso(nuevo_paso):
@@ -1515,7 +1716,14 @@ if menu_elegido == "🏠 Inicio semanal":
     trabajos_fin_semana = [trabajo for trabajo in trabajos_agenda if viernes < trabajo["fecha"] <= domingo]
     trabajos_atrasados = [
         trabajo for trabajo in trabajos_agenda
-        if trabajo["tipo"] in {"interno", "cliente"} and trabajo["fecha"] < hoy
+        if (
+            trabajo["tipo"] in {"interno", "cliente"}
+            or (
+                trabajo["tipo"] == "mantenimiento"
+                and trabajo["estado"] == "Mantenimiento en Proceso"
+            )
+        )
+        and trabajo["fecha"] < hoy
     ]
 
     dias_semana = [
@@ -1561,7 +1769,6 @@ if menu_elegido == "🏠 Inicio semanal":
     with st.container(key="agenda-mobile"):
         _mostrar_controles_semana(lunes, viernes, hoy, "mobile")
         with st.expander(f"⚠️ Ver atrasados · {len(trabajos_atrasados)}", expanded=False):
-            st.caption("Los ingresos técnicos no se clasifican como atrasados: solo tienen fecha de ingreso, no turno programado.")
             _mostrar_atrasados(trabajos_atrasados, hoy, "mobile", ancho_completo=True)
 
         opciones_dia = list(range(5))
@@ -1590,8 +1797,9 @@ if menu_elegido == "🏠 Inicio semanal":
     st.caption(
         f"Pendientes incluidos: {sum(trabajo['tipo'] == 'interno' for trabajo in trabajos_agenda)} internos, "
         f"{sum(trabajo['tipo'] == 'cliente' for trabajo in trabajos_agenda)} de clientes y "
-        f"{ingresos_tecnicos} ingresos activos del flujo técnico. "
-        "Los ingresos técnicos se ubican por fecha de ingreso porque la base no registra un turno programado."
+        f"{ingresos_tecnicos} equipos activos del flujo técnico. "
+        "Los mantenimientos en proceso se ubican por su fin estimado; las inspecciones y entregas "
+        "activas sin fecha programada se ubican por la fecha de ingreso."
     )
 
 # ==========================================
@@ -1814,11 +2022,56 @@ elif menu_elegido == "📊 Tablero de Equipos":
             
     st.markdown("---")
     
-    df_ingresos = pd.read_sql_query("SELECT e.id, e.interno, m.marca, m.modelo, e.horas, e.origen, e.mecanico, e.fecha_ingreso, e.hora_inicio, e.estado_proceso FROM equipos_ingresados e JOIN maestro_equipos m ON e.interno = m.interno ORDER BY e.id DESC", conn)
+    df_ingresos = pd.read_sql_query(
+        "SELECT e.id, e.interno, m.marca, m.modelo, e.horas, e.origen, "
+        "e.mecanico, e.fecha_ingreso, e.hora_inicio, e.estado_proceso, "
+        "e.fecha_fin_estimada FROM equipos_ingresados e "
+        "JOIN maestro_equipos m ON e.interno = m.interno ORDER BY e.id DESC",
+        conn,
+    )
     if df_ingresos.empty:
         st.info("No hay equipos ingresados en el sistema.")
     else:
-        st.dataframe(df_ingresos.style.map(colorear_estados, subset=['estado_proceso']), use_container_width=True, hide_index=True)
+        with st.container(key="ingresos-desktop"):
+            tabla_ingresos = df_ingresos.rename(
+                columns={
+                    "id": "ID",
+                    "interno": "Interno",
+                    "marca": "Marca",
+                    "modelo": "Modelo",
+                    "horas": "Horómetro",
+                    "origen": "Origen / destino",
+                    "mecanico": "Mecánico",
+                    "fecha_ingreso": "Fecha de ingreso",
+                    "hora_inicio": "Hora de inicio",
+                    "estado_proceso": "Estado",
+                    "fecha_fin_estimada": "Fin estimado",
+                }
+            )
+            st.dataframe(
+                tabla_ingresos.style.map(colorear_estados, subset=["Estado"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+        with st.container(key="ingresos-mobile"):
+            st.subheader("Ingresos")
+            for _, ingreso in df_ingresos.iterrows():
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{ingreso['interno']} · {ingreso['marca']} {ingreso['modelo']}**"
+                    )
+                    st.markdown(f"**Estado:** {ingreso['estado_proceso']}")
+                    st.caption(
+                        f"Ingreso: {ingreso['fecha_ingreso'] or 'No informado'} · "
+                        f"Origen: {ingreso['origen'] or 'No informado'}"
+                    )
+                    st.caption(
+                        f"Mecánico: {ingreso['mecanico'] or 'No informado'} · "
+                        f"Horómetro: {ingreso['horas'] if pd.notna(ingreso['horas']) else 'No informado'}"
+                    )
+                    if ingreso["fecha_fin_estimada"]:
+                        st.caption(f"Fin estimado: {ingreso['fecha_fin_estimada']}")
+
         opciones_select = {f"{r['interno']} - {r['marca']} {r['modelo']} (ID: {r['id']}) - {r['estado_proceso']}": r['id'] for _, r in df_ingresos.iterrows()}
         detalle_agenda = st.session_state.get("detalle_agenda")
         ingreso_agenda = detalle_agenda[1] if detalle_agenda and detalle_agenda[0] == "mantenimiento" else None
@@ -1879,7 +2132,30 @@ elif menu_elegido == "📊 Tablero de Equipos":
                             st.success("Datos del ingreso corregidos correctamente.")
 
             estado_actual = df_ingresos[df_ingresos['id'] == id_buscado].iloc[0]['estado_proceso']
-            
+
+            if estado_actual == "Mantenimiento en Proceso":
+                with st.form(f"form_fin_estimado_{id_buscado}"):
+                    fecha_fin_actual = _fecha_agenda(
+                        ingreso_actual["fecha_fin_estimada"]
+                    )
+                    fecha_fin_editada = st.date_input(
+                        "Fin estimado",
+                        value=fecha_fin_actual
+                        or datetime.now(
+                            ZoneInfo("America/Argentina/Buenos_Aires")
+                        ).date(),
+                        format="DD/MM/YYYY",
+                    )
+                    if st.form_submit_button("💾 Guardar fin estimado"):
+                        conn.execute(
+                            "UPDATE equipos_ingresados SET fecha_fin_estimada = ? "
+                            "WHERE id = ? AND estado_proceso = 'Mantenimiento en Proceso'",
+                            (fecha_fin_editada.isoformat(), id_buscado),
+                        )
+                        conn.commit()
+                        persistir_y_sync()
+                        st.success("Fin estimado actualizado.")
+
             if estado_actual == 'Inspección Inicial Completada':
                 st.info("💡 Inspección completa. Iniciar Mantenimiento.")
                 st.button(
@@ -2114,84 +2390,152 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
 # 4. PANTALLA: EJECUCIÓN DE MANTENIMIENTO
 # ==========================================
 elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
-    st.title("🛠️ Orden de Trabajo y Reparaciones")
-    if not st.session_state.mant_queue:
+    st.title("🛠️ Checklist de Mantenimiento")
+    ingreso_id = st.session_state.mant_ingreso_id
+    if not ingreso_id:
         st.info("No hay rutina activa. Iníciala desde el Tablero de Equipos.")
     else:
         conn = conectar_db()
-        idx = st.session_state.mant_idx
-        cola = st.session_state.mant_queue
-        total = len(cola)
-        ingreso_id = st.session_state.mant_ingreso_id
-        
-        with st.sidebar:
-            st.markdown("### ⏱️ Control de Tiempos")
-            total_horas = conn.execute("SELECT SUM(horas) FROM registro_horas WHERE ingreso_id = ?", (ingreso_id,)).fetchone()[0]
-            st.metric("Total Horas Invertidas", f"{total_horas or 0} hs")
-            with st.expander("Cargar Horas (Mecánicos)"):
-                with st.form("form_horas"):
-                    df_mec = pd.read_sql_query("SELECT nombre FROM mecanicos", conn)
-                    mec_horas = st.selectbox("Técnico:", df_mec['nombre'].tolist())
-                    h_input = st.number_input("Horas dedicadas hoy:", min_value=0.5, step=0.5, value=1.0)
-                    if st.form_submit_button("💾 Guardar Horas"):
-                        conn.execute("INSERT INTO registro_horas (ingreso_id, fecha, horas, mecanico) VALUES (?, ?, ?, ?)", (ingreso_id, datetime.today().strftime("%d/%m/%Y"), h_input, mec_horas))
-                        conn.commit()
-                        pass
-            st.markdown("---")
-            st.button(
-                "⏸️ Pausar Tareas",
-                use_container_width=True,
-                key=f"btn_pausar_tareas_{ingreso_id}",
-                on_click=pausar_mantenimiento,
-            )
-
-        paso_en_curso = idx < total
-        item = cola[idx] if paso_en_curso else None
-        estado_mantenimiento = conn.execute(
-            "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+        ingreso = conn.execute(
+            "SELECT estado_proceso, fecha_inicio_mantenimiento, fecha_fin_estimada "
+            "FROM equipos_ingresados WHERE id = ?",
             (ingreso_id,),
-        ).fetchone()[0]
-        mantenimiento_cerrado = estado_mantenimiento == "Mantenimiento Completado"
-
-        if paso_en_curso:
-            st.progress(idx / max(total, 1))
-            st.info(f"Operación {idx + 1} de {total}: {item['tarea']}")
+        ).fetchone()
+        if not ingreso:
+            st.error("No se encontró el ingreso seleccionado.")
+            conn.close()
         else:
-            st.progress(1.0)
-            st.info("Etapa final: verificá hallazgos adicionales y cerrá el mantenimiento.")
-
-        st.radio(
-            "Resultado:",
-            ["Realizado", "No Necesario", "Postergado", "Reparado", "No Reparado"],
-            horizontal=True,
-            index=None,
-            key=f"resultado_mantenimiento_{ingreso_id}",
-        )
-        st.text_area(
-            "Notas, insumos o hallazgos adicionales (opcional):",
-            key=f"notas_mantenimiento_{ingreso_id}",
-        )
-        st.button(
-            "Guardar / continuar",
-            key=f"guardar_mantenimiento_{ingreso_id}",
-            on_click=guardar_paso_mantenimiento,
-        )
-        mensaje_mantenimiento = st.session_state.get("mensaje_mantenimiento")
-        if mensaje_mantenimiento:
-            st.warning(mensaje_mantenimiento)
-        mostrar_descargas_pdf(ingreso_id)
-
-        if not mensaje_mantenimiento:
-            st.info(
-                "Al cerrar el mantenimiento, el PDF queda disponible para descarga. También se intenta guardar "
-                "una copia en la carpeta local; en Streamlit Cloud, ese archivo no queda archivado permanentemente."
+            plan = _cargar_plan_mantenimiento(conn, ingreso_id)
+            respuestas = _cargar_respuestas_checklist(
+                conn,
+                "controles_mantenimiento",
+                ingreso_id,
             )
-        st.button(
-            "Volver al Tablero de Equipos",
-            use_container_width=True,
-            key=f"btn_volver_tablero_equipos_{ingreso_id}",
-            on_click=pausar_mantenimiento,
-        )
+            fecha_inicio = _fecha_agenda(ingreso[1]) if ingreso[1] else None
+            fecha_fin = _fecha_agenda(ingreso[2]) if ingreso[2] else None
+            col_inicio, col_fin = st.columns(2)
+            with col_inicio:
+                st.metric(
+                    "Inicio de mantenimiento",
+                    fecha_inicio.strftime("%d/%m/%Y") if fecha_inicio else "No informado",
+                )
+            with col_fin:
+                st.metric(
+                    "Fin estimado",
+                    fecha_fin.strftime("%d/%m/%Y") if fecha_fin else "No informado",
+                )
+            mensaje_mantenimiento = st.session_state.pop(
+                "mensaje_mantenimiento",
+                "",
+            )
+            if mensaje_mantenimiento:
+                if "no se pudo generar el PDF" in mensaje_mantenimiento:
+                    st.warning(mensaje_mantenimiento)
+                elif "guardados automáticamente" in mensaje_mantenimiento:
+                    st.success(mensaje_mantenimiento)
+                else:
+                    st.error(mensaje_mantenimiento)
+
+            if ingreso[0] == "Mantenimiento Completado":
+                st.success("Mantenimiento completado.")
+                mostrar_descargas_pdf(ingreso_id)
+            elif ingreso[0] != "Mantenimiento en Proceso":
+                st.warning("Este equipo ya no figura con un mantenimiento en proceso.")
+            if ingreso[0] != "Mantenimiento en Proceso":
+                st.button(
+                    "Volver al Tablero de Equipos",
+                    use_container_width=True,
+                    key=f"btn_volver_tablero_mantenimiento_{ingreso_id}",
+                    on_click=pausar_mantenimiento,
+                )
+            elif not plan:
+                st.error("No hay pasos configurados para este mantenimiento.")
+            else:
+                with st.sidebar:
+                    st.markdown("### ⏱️ Control de Tiempos")
+                    total_horas = conn.execute(
+                        "SELECT SUM(horas) FROM registro_horas WHERE ingreso_id = ?",
+                        (ingreso_id,),
+                    ).fetchone()[0]
+                    st.metric("Total Horas Invertidas", f"{total_horas or 0} hs")
+                    with st.expander("Cargar Horas (Mecánicos)"):
+                        with st.form(f"form_horas_{ingreso_id}"):
+                            df_mec = pd.read_sql_query(
+                                "SELECT nombre FROM mecanicos ORDER BY nombre",
+                                conn,
+                            )
+                            if df_mec.empty:
+                                st.warning("No hay mecánicos configurados.")
+                            else:
+                                mec_horas = st.selectbox(
+                                    "Técnico:",
+                                    df_mec["nombre"].tolist(),
+                                )
+                                h_input = st.number_input(
+                                    "Horas dedicadas hoy:",
+                                    min_value=0.5,
+                                    step=0.5,
+                                    value=1.0,
+                                )
+                                if st.form_submit_button("💾 Guardar Horas"):
+                                    conn.execute(
+                                        "INSERT INTO registro_horas "
+                                        "(ingreso_id, fecha, horas, mecanico) VALUES (?, ?, ?, ?)",
+                                        (
+                                            ingreso_id,
+                                            datetime.now(
+                                                ZoneInfo("America/Argentina/Buenos_Aires")
+                                            ).strftime("%d/%m/%Y"),
+                                            h_input,
+                                            mec_horas,
+                                        ),
+                                    )
+                                    conn.commit()
+                                    persistir_y_sync()
+                                    st.success("Horas guardadas.")
+                    st.markdown("---")
+                    st.button(
+                        "⏸️ Pausar Tareas",
+                        use_container_width=True,
+                        key=f"btn_pausar_tareas_{ingreso_id}",
+                        on_click=pausar_mantenimiento,
+                    )
+
+                controles_mantenimiento = [
+                    (item["control_id"], item["tarea"], item["tipo"])
+                    for item in plan
+                ]
+                progreso, total_controles = _mostrar_checklist_planilla(
+                    "mantenimiento",
+                    ingreso_id,
+                    controles_mantenimiento,
+                    respuestas,
+                )
+                key_hallazgos = f"hallazgos_mantenimiento_{ingreso_id}"
+                if key_hallazgos not in st.session_state:
+                    guardado = respuestas.get("Reparación Adicional en proceso")
+                    st.session_state[key_hallazgos] = (
+                        guardado["observaciones"] if guardado else ""
+                    )
+                st.text_area(
+                    "Hallazgos adicionales, insumos u observaciones finales (opcional):",
+                    key=key_hallazgos,
+                    on_change=guardar_hallazgos_mantenimiento,
+                    args=(ingreso_id, key_hallazgos),
+                )
+                st.button(
+                    "✅ Finalizar mantenimiento",
+                    key=f"finalizar_mantenimiento_{ingreso_id}",
+                    use_container_width=True,
+                    disabled=progreso < total_controles,
+                    on_click=finalizar_mantenimiento,
+                    args=(ingreso_id,),
+                )
+                mostrar_descargas_pdf(ingreso_id)
+                st.info(
+                    "Los pasos y las observaciones se guardan automáticamente. "
+                    "El mantenimiento solo se finaliza cuando todos los pasos obligatorios están completos."
+                )
         conn.close()
 
 # ==========================================
