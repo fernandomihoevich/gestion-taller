@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from fpdf import FPDF, FPDFException
 import os
@@ -268,6 +268,40 @@ st.markdown("""
         .st-key-agenda-mobile .stButton button {
             min-height: 2.75rem;
         }
+
+        .st-key-ingreso-checklist [data-testid="stHorizontalBlock"],
+        .st-key-salida-checklist [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0.25rem;
+        }
+
+        .st-key-ingreso-checklist [data-testid="stColumn"],
+        .st-key-salida-checklist [data-testid="stColumn"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+
+        .st-key-ingreso-checklist input[type="checkbox"],
+        .st-key-salida-checklist input[type="checkbox"] {
+            transform: scale(1.2);
+        }
+
+        .st-key-ingreso-checklist [data-testid="stCheckbox"] label,
+        .st-key-salida-checklist [data-testid="stCheckbox"] label {
+            min-height: 2.75rem;
+            align-items: center;
+        }
+    }
+
+    .st-key-ingreso-checklist [data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-salida-checklist [data-testid="stVerticalBlockBorderWrapper"] {
+        padding: 0.35rem 0.55rem;
+    }
+
+    .st-key-ingreso-checklist [data-testid="stVerticalBlock"],
+    .st-key-salida-checklist [data-testid="stVerticalBlock"] {
+        gap: 0.35rem;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -562,12 +596,10 @@ def enviar_pdf_por_email(datos_pdf, nombre_archivo, asunto):
 if "navegacion" not in st.session_state: st.session_state.navegacion = "🏠 Inicio semanal"
 if "paso_ingreso" not in st.session_state: st.session_state.paso_ingreso = "registro_inicial"
 if "ultimo_ingreso_id" not in st.session_state: st.session_state.ultimo_ingreso_id = None
-if "idx_control_actual" not in st.session_state: st.session_state.idx_control_actual = 0
 if "mant_queue" not in st.session_state: st.session_state.mant_queue = []
 if "mant_idx" not in st.session_state: st.session_state.mant_idx = 0
 if "mant_ingreso_id" not in st.session_state: st.session_state.mant_ingreso_id = None
 if "salida_ingreso_id" not in st.session_state: st.session_state.salida_ingreso_id = None
-if "idx_control_salida" not in st.session_state: st.session_state.idx_control_salida = 0
 if "hallazgos_extras_ok" not in st.session_state: st.session_state.hallazgos_extras_ok = False
 
 # --- MENÚ LATERAL ---
@@ -611,6 +643,256 @@ def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
 
 
+_ESTADOS_CHECKLIST = {
+    "controles_ingreso": ("OK", "Malo", "No Realizado"),
+    "controles_salida": ("OK", "Malo (Avisar a Taller)", "No Aplica"),
+}
+
+
+def _cargar_respuestas_checklist(conn, tabla, ingreso_id):
+    if tabla not in _ESTADOS_CHECKLIST:
+        raise ValueError(f"Tabla de checklist no válida: {tabla}")
+    filas = conn.execute(
+        f"SELECT tarea, estado, observaciones FROM {tabla} WHERE ingreso_id = ? ORDER BY id",
+        (ingreso_id,),
+    ).fetchall()
+    return {
+        fila[0]: {"estado": fila[1], "observaciones": fila[2] or ""}
+        for fila in filas
+    }
+
+
+def _contar_checklist_completados(descripciones, respuestas, tabla):
+    estados_validos = _ESTADOS_CHECKLIST.get(tabla)
+    if estados_validos is None:
+        raise ValueError(f"Tabla de checklist no válida: {tabla}")
+    return sum(
+        1
+        for descripcion in descripciones
+        if descripcion in respuestas
+        and respuestas[descripcion]["estado"] in estados_validos
+    )
+
+
+def _persistir_respuesta_checklist(
+    tabla,
+    ingreso_id,
+    tarea,
+    completado_key,
+    estado_key,
+    observaciones_key,
+    error_key,
+):
+    estados_validos = _ESTADOS_CHECKLIST.get(tabla)
+    if estados_validos is None:
+        raise ValueError(f"Tabla de checklist no válida: {tabla}")
+
+    conn = conectar_db()
+    try:
+        if not st.session_state[completado_key]:
+            conn.execute(
+                f"DELETE FROM {tabla} WHERE ingreso_id = ? AND tarea = ?",
+                (ingreso_id, tarea),
+            )
+            conn.commit()
+            persistir_y_sync()
+            st.session_state[estado_key] = None
+            st.session_state[observaciones_key] = ""
+            st.session_state.checklist_guardado = (
+                "success",
+                "Paso desmarcado y guardado.",
+            )
+            st.session_state.pop(error_key, None)
+            return
+
+        estado = st.session_state.get(estado_key)
+        if estado not in estados_validos:
+            st.session_state[error_key] = (
+                "Seleccioná una condición antes de marcar el paso como completo."
+            )
+            return
+
+        observaciones = (st.session_state.get(observaciones_key) or "").strip()
+        respuesta = conn.execute(
+            f"SELECT id FROM {tabla} WHERE ingreso_id = ? AND tarea = ? ORDER BY id DESC LIMIT 1",
+            (ingreso_id, tarea),
+        ).fetchone()
+        if respuesta:
+            conn.execute(
+                f"UPDATE {tabla} SET estado = ?, observaciones = ? "
+                "WHERE ingreso_id = ? AND tarea = ?",
+                (estado, observaciones, ingreso_id, tarea),
+            )
+        else:
+            conn.execute(
+                f"INSERT INTO {tabla} (ingreso_id, tarea, estado, observaciones) "
+                "VALUES (?, ?, ?, ?)",
+                (ingreso_id, tarea, estado, observaciones),
+            )
+        conn.commit()
+        persistir_y_sync()
+        st.session_state.checklist_guardado = (
+            "success",
+            "Cambios guardados automáticamente.",
+        )
+        st.session_state.pop(error_key, None)
+    finally:
+        conn.close()
+
+
+def _guardar_estado_checklist(
+    tabla,
+    ingreso_id,
+    tarea,
+    completado_key,
+    estado_key,
+    observaciones_key,
+    error_key,
+):
+    st.session_state[completado_key] = True
+    _persistir_respuesta_checklist(
+        tabla,
+        ingreso_id,
+        tarea,
+        completado_key,
+        estado_key,
+        observaciones_key,
+        error_key,
+    )
+
+
+def _guardar_observaciones_checklist(
+    tabla,
+    ingreso_id,
+    tarea,
+    completado_key,
+    estado_key,
+    observaciones_key,
+    error_key,
+):
+    if st.session_state[completado_key]:
+        _persistir_respuesta_checklist(
+            tabla,
+            ingreso_id,
+            tarea,
+            completado_key,
+            estado_key,
+            observaciones_key,
+            error_key,
+        )
+
+
+def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
+    tabla = {
+        "ingreso": "controles_ingreso",
+        "salida": "controles_salida",
+    }[tipo]
+    estados = _ESTADOS_CHECKLIST[tabla]
+    progreso = _contar_checklist_completados(
+        [tarea for _, tarea, _ in controles],
+        respuestas,
+        tabla,
+    )
+    total = len(controles)
+    titulo = "Checklist de ingreso" if tipo == "ingreso" else "Checklist de salida"
+
+    with st.container(key=f"{tipo}-checklist"):
+        st.subheader(titulo)
+        st.caption(
+            "Los controles están en el orden configurado. Cada respuesta y observación "
+            "se guarda automáticamente."
+        )
+        st.write(f"**{progreso} de {total} pasos completados**")
+        st.progress(progreso / total if total else 0)
+        mensaje_guardado = st.session_state.pop("checklist_guardado", None)
+        if mensaje_guardado:
+            nivel, mensaje = mensaje_guardado
+            (st.success if nivel == "success" else st.warning)(mensaje)
+
+        for indice, (control_id, tarea, _) in enumerate(controles, start=1):
+            respuesta = respuestas.get(tarea)
+            prefijo = f"checklist_{tipo}_{ingreso_id}_{control_id}"
+            completado_key = f"{prefijo}_completado"
+            estado_key = f"{prefijo}_estado"
+            observaciones_key = f"{prefijo}_observaciones"
+            error_key = f"{prefijo}_error"
+            if completado_key not in st.session_state:
+                st.session_state[completado_key] = bool(respuesta)
+            if estado_key not in st.session_state:
+                estado_guardado = respuesta["estado"] if respuesta else None
+                st.session_state[estado_key] = (
+                    estado_guardado if estado_guardado in estados else None
+                )
+            if observaciones_key not in st.session_state:
+                st.session_state[observaciones_key] = (
+                    respuesta["observaciones"] if respuesta else ""
+                )
+
+            argumentos = (
+                tabla,
+                ingreso_id,
+                tarea,
+                completado_key,
+                estado_key,
+                observaciones_key,
+                error_key,
+            )
+            with st.container(border=True):
+                col_estado, col_tarea, col_respuesta, col_observaciones = st.columns(
+                    [0.85, 3.2, 1.5, 2.4],
+                    gap="small",
+                )
+                with col_estado:
+                    st.checkbox(
+                        "Completo",
+                        key=completado_key,
+                        on_change=_persistir_respuesta_checklist,
+                        args=argumentos,
+                    )
+                with col_tarea:
+                    st.markdown(f"**{indice}. {tarea}**")
+                with col_respuesta:
+                    indice_estado = (
+                        estados.index(st.session_state[estado_key])
+                        if st.session_state[estado_key] in estados
+                        else None
+                    )
+                    st.selectbox(
+                        "Condición",
+                        estados,
+                        index=indice_estado,
+                        key=estado_key,
+                        on_change=_guardar_estado_checklist,
+                        args=argumentos,
+                        label_visibility="collapsed",
+                        placeholder="Elegí condición",
+                    )
+                with col_observaciones:
+                    if (
+                        st.session_state[completado_key]
+                        and st.session_state[estado_key] in estados
+                    ):
+                        st.text_area(
+                            "Observaciones",
+                            key=observaciones_key,
+                            height=68,
+                            on_change=_guardar_observaciones_checklist,
+                            args=argumentos,
+                            label_visibility="collapsed",
+                            placeholder="Observaciones (opcional)",
+                        )
+                    elif st.session_state[completado_key]:
+                        st.caption("Elegí una condición para guardar este paso.")
+                    else:
+                        st.caption("Respuesta y observaciones al marcar el paso.")
+
+            error = st.session_state.get(error_key)
+            if error:
+                st.warning(error)
+
+    return progreso, total
+
+
 def _fecha_agenda(valor):
     if valor is None or pd.isna(valor):
         return None
@@ -621,6 +903,10 @@ def _fecha_agenda(valor):
         except ValueError:
             continue
     return None
+
+
+def _desplazamiento_semana_por_defecto(hoy):
+    return 1 if hoy.weekday() >= 5 else 0
 
 
 def _cargar_trabajos_agenda(conn):
@@ -1036,6 +1322,95 @@ def continuar_mantenimiento_desde_inspeccion(ingreso_id):
     preparar_mantenimiento(ingreso_id)
 
 
+def iniciar_checklist_salida(ingreso_id):
+    conn = conectar_db()
+    try:
+        conn.execute(
+            "UPDATE equipos_ingresados SET estado_proceso = 'Checklist Salida en Proceso' "
+            "WHERE id = ? AND estado_proceso = 'Mantenimiento Completado'",
+            (ingreso_id,),
+        )
+        conn.commit()
+        persistir_y_sync()
+    finally:
+        conn.close()
+    st.session_state.salida_ingreso_id = ingreso_id
+    cambiar_pagina("✅ Entrega de Equipo (Salida)")
+
+
+def retomar_checklist_salida(ingreso_id):
+    st.session_state.salida_ingreso_id = ingreso_id
+    cambiar_pagina("✅ Entrega de Equipo (Salida)")
+
+
+def finalizar_checklist_salida(ingreso_id):
+    conn = conectar_db()
+    try:
+        ingreso = conn.execute(
+            "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+            (ingreso_id,),
+        ).fetchone()
+        controles = conn.execute(
+            "SELECT descripcion FROM maestro_controles_salida ORDER BY orden, id"
+        ).fetchall()
+        respuestas = _cargar_respuestas_checklist(
+            conn,
+            "controles_salida",
+            ingreso_id,
+        )
+        total = len(controles)
+        completados = _contar_checklist_completados(
+            [fila[0] for fila in controles],
+            respuestas,
+            "controles_salida",
+        )
+        if not ingreso:
+            st.session_state[f"error_salida_{ingreso_id}"] = (
+                "No se encontró el ingreso seleccionado."
+            )
+            return
+        if ingreso[0] != "Checklist Salida en Proceso":
+            st.session_state[f"error_salida_{ingreso_id}"] = (
+                "El equipo ya no está en un checklist de salida activo."
+            )
+            return
+        if total == 0 or completados < total:
+            st.session_state[f"error_salida_{ingreso_id}"] = (
+                f"Completá todos los controles antes de finalizar "
+                f"({completados} de {total})."
+            )
+            return
+
+        actualizacion = conn.execute(
+            "UPDATE equipos_ingresados SET estado_proceso = 'Equipo Entregado' "
+            "WHERE id = ? AND estado_proceso = 'Checklist Salida en Proceso'",
+            (ingreso_id,),
+        )
+        if actualizacion.rowcount != 1:
+            st.session_state[f"error_salida_{ingreso_id}"] = (
+                "No se pudo finalizar porque el estado del equipo cambió. Actualizá la pantalla."
+            )
+            return
+        conn.commit()
+        persistir_y_sync()
+        st.session_state.pop(f"error_salida_{ingreso_id}", None)
+    finally:
+        conn.close()
+
+    try:
+        st.session_state[f"certificado_salida_{ingreso_id}"] = generar_pdf_entrega(
+            ingreso_id
+        )
+        st.session_state.pop(f"error_certificado_salida_{ingreso_id}", None)
+    except PdfGenerationError as exc:
+        st.session_state[f"error_certificado_salida_{ingreso_id}"] = str(exc)
+
+
+def volver_desde_checklist_salida():
+    st.session_state.salida_ingreso_id = None
+    cambiar_pagina("📊 Tablero de Equipos")
+
+
 def pausar_mantenimiento():
     st.session_state.mant_queue = []
     st.session_state.hallazgos_extras_ok = False
@@ -1127,9 +1502,10 @@ if menu_elegido == "🏠 Inicio semanal":
     finally:
         conn.close()
 
-    if "agenda_semana_offset" not in st.session_state:
-        st.session_state.agenda_semana_offset = 0
     hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+    if st.session_state.get("agenda_semana_fecha_referencia") != hoy:
+        st.session_state.agenda_semana_offset = _desplazamiento_semana_por_defecto(hoy)
+        st.session_state.agenda_semana_fecha_referencia = hoy
     lunes_actual = hoy - timedelta(days=hoy.weekday())
     lunes = lunes_actual + timedelta(weeks=st.session_state.agenda_semana_offset)
     viernes = lunes + timedelta(days=4)
@@ -1352,14 +1728,14 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 db = conectar_db()
                 try:
                     controles_hechos = db.execute(
-                        "SELECT COUNT(*) FROM controles_ingreso WHERE ingreso_id = ? AND tarea != 'Falla Adicional Detectada'",
+                        "SELECT COUNT(DISTINCT tarea) FROM controles_ingreso "
+                        "WHERE ingreso_id = ? AND tarea != 'Falla Adicional Detectada'",
                         (ingreso_id,),
                     ).fetchone()[0]
                     total_controles = db.execute("SELECT COUNT(*) FROM maestro_controles_ingreso").fetchone()[0]
                 finally:
                     db.close()
                 st.session_state.ultimo_ingreso_id = ingreso_id
-                st.session_state.idx_control_actual = controles_hechos
                 st.session_state.paso_ingreso = "fallas_adicionales" if controles_hechos >= total_controles else "checklist"
                 cambiar_pagina("🚜 Ingreso de Equipo (Guiado)")
 
@@ -1402,24 +1778,11 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 args=(id_retomar,),
             )
         else:
-            def retomar_salida(ingreso_id):
-                db = conectar_db()
-                try:
-                    controles_hechos = db.execute(
-                        "SELECT COUNT(*) FROM controles_salida WHERE ingreso_id = ?",
-                        (ingreso_id,),
-                    ).fetchone()[0]
-                finally:
-                    db.close()
-                st.session_state.salida_ingreso_id = ingreso_id
-                st.session_state.idx_control_salida = controles_hechos
-                cambiar_pagina("✅ Entrega de Equipo (Salida)")
-
             st.button(
                 "➡️ Retomar Tarea Seleccionada",
                 key="retomar_tarea_incompleta",
                 use_container_width=True,
-                on_click=retomar_salida,
+                on_click=retomar_checklist_salida,
                 args=(id_retomar,),
             )
 
@@ -1556,12 +1919,13 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 )
                 
                 st.write("---")
-                if st.button("📋 Iniciar Checklist de Salida / Entrega", use_container_width=True):
-                    conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Checklist Salida en Proceso' WHERE id = ?", (id_buscado,))
-                    conn.commit()
-                    st.session_state.salida_ingreso_id = id_buscado
-                    st.session_state.idx_control_salida = 0
-                    cambiar_pagina("✅ Entrega de Equipo (Salida)")
+                st.button(
+                    "📋 Iniciar Checklist de Salida / Entrega",
+                    use_container_width=True,
+                    key=f"iniciar_salida_{id_buscado}",
+                    on_click=iniciar_checklist_salida,
+                    args=(id_buscado,),
+                )
 
             elif estado_actual == 'Equipo Entregado':
                 st.success("🎉 Equipo entregado. Proceso finalizado en su totalidad.")
@@ -1585,7 +1949,11 @@ elif menu_elegido == "📊 Tablero de Equipos":
 elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
     st.title("🚜 Recepción de Equipos y Diagnóstico")
     conn = conectar_db()
-    lista_ingreso = pd.read_sql_query("SELECT descripcion FROM maestro_controles_ingreso ORDER BY orden", conn)['descripcion'].tolist()
+    controles_ingreso = pd.read_sql_query(
+        "SELECT id, descripcion, orden FROM maestro_controles_ingreso ORDER BY orden, id",
+        conn,
+    )
+    lista_ingreso = controles_ingreso["descripcion"].tolist()
     
     if st.session_state.paso_ingreso == "registro_inicial":
         st.subheader("Paso 1: Datos de Recepción")
@@ -1646,34 +2014,38 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                         st.session_state.ultimo_ingreso_id = resultado_ingreso.fetchone()[0]
                         conn.commit()
                         persistir_y_sync()
-                        st.session_state.idx_control_actual = 0
+                        st.session_state.salida_ingreso_id = None
                         avanzar_paso_ingreso("checklist")
+                        conn.close()
+                        st.rerun()
                     
     elif st.session_state.paso_ingreso == "checklist":
-        idx = st.session_state.idx_control_actual
-        if idx >= len(lista_ingreso):
-            st.session_state.paso_ingreso = "fallas_adicionales"
-            pass
+        ingreso_id = st.session_state.ultimo_ingreso_id
+        if not ingreso_id:
+            st.error("No hay un ingreso activo. Retomalo desde el Tablero de Equipos.")
+        elif not controles_ingreso.empty:
+            respuestas = _cargar_respuestas_checklist(
+                conn,
+                "controles_ingreso",
+                ingreso_id,
+            )
+            progreso, total_controles = _mostrar_checklist_planilla(
+                "ingreso",
+                ingreso_id,
+                list(controles_ingreso.itertuples(index=False, name=None)),
+                respuestas,
+            )
+            st.button(
+                "Continuar a fallas adicionales →",
+                key=f"continuar_fallas_{ingreso_id}",
+                use_container_width=True,
+                on_click=avanzar_paso_ingreso,
+                args=("fallas_adicionales",),
+                disabled=progreso < total_controles,
+            )
+        else:
+            st.error("No hay ítems configurados en el Checklist de Ingreso.")
             
-        tarea_actual = lista_ingreso[idx]
-        st.subheader(f"Inspección: Control {idx+1} de {len(lista_ingreso)}")
-        st.info(f"📋 Evalúe el estado de: **{tarea_actual}**")
-        with st.form(f"form_chk_{idx}"):
-            estado = st.radio("Condición:", ["OK", "Malo", "No Realizado"], horizontal=True, index=None)
-            obs = st.text_area("Observaciones:")
-            if st.form_submit_button("Guardar y continuar ➡️"):
-                if estado is None:
-                    st.error("⚠️ Es obligatorio seleccionar una Condición.")
-                else:
-                    conn.execute("INSERT INTO controles_ingreso (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", (st.session_state.ultimo_ingreso_id, tarea_actual, estado, obs.strip()))
-                    
-                    if idx == len(lista_ingreso) - 1:
-                        avanzar_paso_ingreso("fallas_adicionales")
-                    else:
-                        st.session_state.idx_control_actual += 1
-                    
-                    conn.commit()
-                    
     elif st.session_state.paso_ingreso == "fallas_adicionales":
         st.subheader("⚠️ Fallas o Roturas Adicionales")
         st.write("Si detectaste algún problema extra en la máquina que no estaba en el checklist, detallalo acá (opcional):")
@@ -1690,16 +2062,51 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                 
             if st.form_submit_button("✅ Finalizar Inspección Completa"):
                 fallas_extra = [f for f in [f1, f2, f3, f4, f5] if f.strip() != ""]
-                
-                for falla in fallas_extra:
-                    conn.execute("INSERT INTO controles_ingreso (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", 
-                                 (st.session_state.ultimo_ingreso_id, "Falla Adicional Detectada", "Malo", falla.strip()))
-                
-                conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Inspección Inicial Completada', hora_fin = ? WHERE id = ?", (datetime.now().strftime("%d/%m/%Y %H:%M:%S"), st.session_state.ultimo_ingreso_id))
-                conn.commit()
-                st.session_state.paso_ingreso = "registro_inicial"
-                st.success("¡Checklist completo y fallas adicionales guardadas correctamente!")
-                cambiar_pagina("📊 Tablero de Equipos")
+                ingreso_id = st.session_state.ultimo_ingreso_id
+                respuestas = _cargar_respuestas_checklist(
+                    conn,
+                    "controles_ingreso",
+                    ingreso_id,
+                )
+                controles_hechos = _contar_checklist_completados(
+                    lista_ingreso,
+                    respuestas,
+                    "controles_ingreso",
+                )
+                if not lista_ingreso:
+                    st.error("No hay controles configurados; no se puede finalizar el ingreso.")
+                elif controles_hechos < len(lista_ingreso):
+                    st.error(
+                        f"Completá todos los controles antes de finalizar "
+                        f"({controles_hechos} de {len(lista_ingreso)})."
+                    )
+                else:
+                    estado_ingreso = conn.execute(
+                        "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+                        (ingreso_id,),
+                    ).fetchone()
+                    if not estado_ingreso or estado_ingreso[0] != "En Proceso de Inspección":
+                        st.error("El ingreso ya no está en estado de inspección activa.")
+                    else:
+                        for falla in fallas_extra:
+                            conn.execute(
+                                "INSERT INTO controles_ingreso "
+                                "(ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)",
+                                (ingreso_id, "Falla Adicional Detectada", "Malo", falla.strip()),
+                            )
+
+                        conn.execute(
+                            "UPDATE equipos_ingresados SET estado_proceso = "
+                            "'Inspección Inicial Completada', hora_fin = ? WHERE id = ?",
+                            (datetime.now().strftime("%d/%m/%Y %H:%M:%S"), ingreso_id),
+                        )
+                        conn.commit()
+                        persistir_y_sync()
+                        st.session_state.paso_ingreso = "registro_inicial"
+                        st.session_state.ultimo_ingreso_id = None
+                        cambiar_pagina("📊 Tablero de Equipos")
+                        conn.close()
+                        st.rerun()
 
     conn.close()
 
@@ -1793,24 +2200,30 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
 elif menu_elegido == "✅ Entrega de Equipo (Salida)":
     st.title("✅ Control de Calidad y Entrega")
     conn = conectar_db()
-    lista_salida = pd.read_sql_query("SELECT descripcion FROM maestro_controles_salida ORDER BY orden", conn)['descripcion'].tolist()
+    controles_salida = pd.read_sql_query(
+        "SELECT id, descripcion, orden FROM maestro_controles_salida ORDER BY orden, id",
+        conn,
+    )
+    lista_salida = controles_salida["descripcion"].tolist()
     ingreso_id = st.session_state.salida_ingreso_id
     
     if not ingreso_id:
         st.info("No hay Checklist de Salida activo. Inicialo desde el Tablero de Equipos.")
     else:
-        idx = st.session_state.idx_control_salida
-        if idx >= len(lista_salida):
-            conn.execute("UPDATE equipos_ingresados SET estado_proceso = 'Equipo Entregado' WHERE id = ?", (ingreso_id,))
-            conn.commit()
-            try:
-                bytes_entrega, nombre_entrega = generar_pdf_entrega(ingreso_id)
-            except PdfGenerationError as exc:
-                st.error(f"No se pudo generar el Certificado de Entrega: {exc}")
-                st.info("El checklist quedó completado, pero el certificado no está disponible para descargar.")
-            else:
-                st.success("🎉 ¡Checklist de Salida Completado! El equipo quedó habilitado para ser retirado.")
-                st.balloons()
+        estado_ingreso = conn.execute(
+            "SELECT estado_proceso FROM equipos_ingresados WHERE id = ?",
+            (ingreso_id,),
+        ).fetchone()
+        if not estado_ingreso:
+            st.error("No se encontró el ingreso seleccionado.")
+        elif estado_ingreso[0] == "Equipo Entregado":
+            st.success("🎉 Checklist de salida completado. El equipo quedó habilitado para ser retirado.")
+            certificado = st.session_state.get(f"certificado_salida_{ingreso_id}")
+            error_certificado = st.session_state.get(
+                f"error_certificado_salida_{ingreso_id}"
+            )
+            if certificado:
+                bytes_entrega, nombre_entrega = certificado
                 st.download_button(
                     label="📄 Descargar Certificado de Entrega (PDF)",
                     data=bytes_entrega,
@@ -1819,32 +2232,61 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                     use_container_width=True,
                     key=f"dl_entrega_checklist_{ingreso_id}",
                 )
-                if st.button("✉️ Enviar Certificado por email", key=f"mail_entrega_activa_{ingreso_id}", use_container_width=True):
-                    enviado, detalle = enviar_pdf_por_email(bytes_entrega, nombre_entrega, "Certificado de entrega")
-                    (st.success if enviado else st.warning)(f"Certificado enviado a {detalle}." if enviado else detalle)
+                if st.button(
+                    "✉️ Enviar Certificado por email",
+                    key=f"mail_entrega_activa_{ingreso_id}",
+                    use_container_width=True,
+                ):
+                    enviado, detalle = enviar_pdf_por_email(
+                        bytes_entrega,
+                        nombre_entrega,
+                        "Certificado de entrega",
+                    )
+                    (st.success if enviado else st.warning)(
+                        f"Certificado enviado a {detalle}." if enviado else detalle
+                    )
                 st.caption(
                     "El certificado se descarga en tu dispositivo. La copia local no queda archivada "
                     "permanentemente en Streamlit Cloud."
                 )
-            
-            if st.button("Volver al Tablero", use_container_width=True, key="btn_volver_tablero_entrega"):
-                st.session_state.salida_ingreso_id = None
-                cambiar_pagina("📊 Tablero de Equipos")
+            else:
+                if error_certificado:
+                    st.error(f"No se pudo generar el Certificado de Entrega: {error_certificado}")
+                else:
+                    st.info("El checklist quedó completo; el certificado puede generarse desde el Tablero de Equipos.")
+            st.button(
+                "Volver al Tablero",
+                use_container_width=True,
+                key=f"btn_volver_tablero_entrega_{ingreso_id}",
+                on_click=volver_desde_checklist_salida,
+            )
+        elif estado_ingreso[0] != "Checklist Salida en Proceso":
+            st.info("No hay un Checklist de Salida activo para este equipo. Iniciálo desde el Tablero de Equipos.")
+        elif controles_salida.empty:
+            st.error("No hay ítems configurados en el Checklist de Salida.")
         else:
-            tarea_actual = lista_salida[idx]
-            st.progress((idx) / len(lista_salida))
-            st.subheader(f"Control Final: {idx+1} de {len(lista_salida)}")
-            st.info(f"📋 Verificá para entregar: **{tarea_actual}**")
-            with st.form(f"form_salida_{idx}"):
-                estado = st.radio("Condición:", ["OK", "Malo (Avisar a Taller)", "No Aplica"], horizontal=True, index=None)
-                obs = st.text_area("Observaciones:")
-                if st.form_submit_button("Guardar y Continuar ➡️"):
-                    if estado is None:
-                        st.error("⚠️ Obligatorio seleccionar Condición.")
-                    else:
-                        conn.execute("INSERT INTO controles_salida (ingreso_id, tarea, estado, observaciones) VALUES (?, ?, ?, ?)", (ingreso_id, tarea_actual, estado, obs.strip()))
-                        conn.commit()
-                        st.session_state.idx_control_salida += 1
+            respuestas = _cargar_respuestas_checklist(
+                conn,
+                "controles_salida",
+                ingreso_id,
+            )
+            progreso, total_controles = _mostrar_checklist_planilla(
+                "salida",
+                ingreso_id,
+                list(controles_salida.itertuples(index=False, name=None)),
+                respuestas,
+            )
+            st.button(
+                "✅ Finalizar entrega",
+                key=f"finalizar_salida_{ingreso_id}",
+                use_container_width=True,
+                disabled=progreso < total_controles,
+                on_click=finalizar_checklist_salida,
+                args=(ingreso_id,),
+            )
+            mensaje_error = st.session_state.get(f"error_salida_{ingreso_id}")
+            if mensaje_error:
+                st.error(mensaje_error)
     conn.close()
 
 # =========================================================
