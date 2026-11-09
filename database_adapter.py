@@ -321,6 +321,47 @@ def _migrar_fecha_necesaria_compras(cursor, is_postgresql):
         cursor.execute("ALTER TABLE lista_compras ADD COLUMN fecha_necesaria TEXT")
 
 
+def inicializar_tablas_acceso(conn):
+    """Crea las tablas internas de perfiles/permisos y las bloquea en la API pública."""
+    cursor = conn.cursor()
+    if not (
+        hasattr(cursor, "connection")
+        and hasattr(cursor.connection, "server_version")
+    ):
+        raise RuntimeError("Las tablas de acceso requieren PostgreSQL/Supabase.")
+
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS public.app_user_profiles (
+            user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+            email TEXT NOT NULL UNIQUE,
+            full_name TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'common'
+                CHECK (role IN ('admin', 'common')),
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS public.app_user_permissions (
+            user_id UUID NOT NULL
+                REFERENCES public.app_user_profiles(user_id) ON DELETE CASCADE,
+            section_key TEXT NOT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            PRIMARY KEY (user_id, section_key)
+        )"""
+    )
+    for tabla in ("app_user_profiles", "app_user_permissions"):
+        cursor.execute(
+            f"ALTER TABLE public.{tabla} ENABLE ROW LEVEL SECURITY"
+        )
+        cursor.execute(
+            f"REVOKE ALL ON TABLE public.{tabla} "
+            "FROM PUBLIC, anon, authenticated"
+        )
+
+    conn.commit()
+
+
 def _remote_db_is_empty(db_url=None):
     """Comprueba si la base de datos remota tiene tablas en el schema public."""
     psy = _import_psycopg2()

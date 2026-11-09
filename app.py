@@ -7,10 +7,14 @@ import os
 import re
 import sqlite3
 import smtplib
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from zoneinfo import ZoneInfo
 from psycopg2 import Error as PsycopgError
 
-from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db, has_remote_db, IS_CLOUD
+from database_adapter import conectar_db, ensure_database_file, crear_respaldo_db, sincronizar_supabase, ensure_remote_restore, inicializar_db, inicializar_tablas_acceso, has_remote_db, IS_CLOUD
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestión de Taller", layout="wide")
@@ -378,22 +382,6 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- BASE DE DATOS Y ESTRUCTURA ---
-# En Streamlit Cloud el filesystem es efímero: requerimos DATABASE_URL para
-# persistencia. Si estamos en Cloud y no hay DB remota, bloqueamos para evitar
-# pérdida de datos hasta que el secreto `DATABASE_URL` sea configurado.
-if IS_CLOUD and not has_remote_db():
-    st.error("La app está desplegada en Streamlit Cloud y no hay base remota configurada. Configure 'DATABASE_URL' en los Secrets de la app para evitar pérdida de datos. Mientras tanto, las operaciones de escritura están deshabilitadas.")
-    st.stop()
-
-DB_PATH = ensure_database_file()
-if not IS_CLOUD:
-    ensure_remote_restore(DB_PATH)
-conn_inicial = conectar_db()
-inicializar_db(conn_inicial)
-conn_inicial.close()
-
-
 def persistir_y_sync():
     """Genera respaldo local y sincroniza con Supabase tras cambios importantes."""
     if IS_CLOUD:
@@ -406,6 +394,815 @@ def persistir_y_sync():
         sincronizar_supabase(DB_PATH)
     except Exception:
         pass
+
+
+SECCIONES_APP = (
+    ("inicio_semanal", "🏠 Inicio semanal"),
+    ("tablero_taller", "📊 Tablero Taller"),
+    ("tablero_equipos", "📊 Tablero de Equipos"),
+    ("trabajos_clientes", "💼 Trabajos Clientes"),
+    ("lista_compras", "🛒 Lista de Compras"),
+    ("ingreso_equipo", "🚜 Ingreso de Equipo (Guiado)"),
+    ("ejecucion_mantenimiento", "🛠️ Ejecución de Mantenimiento"),
+    ("entrega_equipo", "✅ Entrega de Equipo (Salida)"),
+    ("archivo_pdfs", "🗂️ Archivo de PDFs"),
+    ("configuracion_general", "⚙️ Configuración General"),
+    ("personal_mecanico", "👥 Personal Mecánico"),
+    ("reportes_facturacion", "📈 Reportes y Facturación"),
+)
+ETIQUETA_A_SECCION = {
+    etiqueta: clave for clave, etiqueta in SECCIONES_APP
+}
+PANTALLA_USUARIOS = "🔐 Usuarios y permisos"
+CLAVES_ESTADO_AUTENTICACION = (
+    "auth_access_token",
+    "auth_refresh_token",
+    "auth_user_id",
+    "auth_email",
+    "auth_full_name",
+    "auth_is_admin",
+    "auth_permissions",
+)
+
+
+class SupabaseAuthError(RuntimeError):
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _leer_secreto(nombre):
+    valor = os.environ.get(nombre)
+    if valor:
+        return valor.strip()
+    try:
+        valor = st.secrets.get(nombre)
+    except Exception:
+        valor = None
+    return valor.strip() if isinstance(valor, str) and valor.strip() else None
+
+
+def _configuracion_autenticacion():
+    nueva_clave_secreta = _leer_secreto("SUPABASE_SECRET_KEY")
+    clave_service_role = _leer_secreto("SUPABASE_SERVICE_ROLE_KEY")
+    return {
+        "url": _leer_secreto("SUPABASE_URL"),
+        "publishable_key": (
+            _leer_secreto("SUPABASE_PUBLISHABLE_KEY")
+            or _leer_secreto("SUPABASE_ANON_KEY")
+        ),
+        "secret_key": nueva_clave_secreta or clave_service_role,
+        "secret_key_legacy": not nueva_clave_secreta and bool(clave_service_role),
+        "app_url": _leer_secreto("APP_URL"),
+        "admin_email": (_leer_secreto("ADMIN_EMAIL") or "").casefold(),
+    }
+
+
+def _mensaje_error_auth(cuerpo, status):
+    try:
+        datos = json.loads(cuerpo.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        datos = {}
+    if not isinstance(datos, dict):
+        datos = {}
+    mensaje = (
+        datos.get("msg")
+        or datos.get("message")
+        or datos.get("error_description")
+        or datos.get("error")
+    )
+    if not isinstance(mensaje, str) or not mensaje.strip():
+        mensaje = f"Supabase rechazó la solicitud (HTTP {status})."
+    return mensaje.strip()[:400]
+
+
+def _solicitud_supabase(config, endpoint, api_key, method="GET", data=None, token=None):
+    url = f"{config['url'].rstrip('/')}{endpoint}"
+    headers = {
+        "apikey": api_key,
+        "Accept": "application/json",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    cuerpo = json.dumps(data).encode("utf-8") if data is not None else None
+    request = urllib.request.Request(
+        url,
+        data=cuerpo,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            contenido = response.read()
+    except urllib.error.HTTPError as exc:
+        raise SupabaseAuthError(
+            _mensaje_error_auth(exc.read(), exc.code),
+            exc.code,
+        ) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise SupabaseAuthError(
+            "No se pudo conectar con Supabase Auth. Verificá la URL y la conectividad."
+        ) from exc
+    if not contenido:
+        return {}
+    try:
+        respuesta = json.loads(contenido.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SupabaseAuthError(
+            "Supabase Auth devolvió una respuesta inválida."
+        ) from exc
+    if not isinstance(respuesta, dict):
+        raise SupabaseAuthError("Supabase Auth devolvió un formato inesperado.")
+    return respuesta
+
+
+def _limpiar_sesion_autenticacion():
+    st.session_state.clear()
+
+
+def _guardar_tokens_auth(respuesta):
+    usuario = respuesta.get("user") or {}
+    user_id = usuario.get("id")
+    email = usuario.get("email")
+    access_token = respuesta.get("access_token")
+    refresh_token = respuesta.get("refresh_token")
+    if not all((user_id, email, access_token, refresh_token)):
+        raise SupabaseAuthError("Supabase no devolvió una sesión completa.")
+    st.session_state["auth_access_token"] = access_token
+    st.session_state["auth_refresh_token"] = refresh_token
+    st.session_state["auth_user_id"] = str(user_id)
+    st.session_state["auth_email"] = str(email)
+
+
+def _obtener_parametros_url():
+    if hasattr(st, "query_params"):
+        parametros = st.query_params
+        return {
+            nombre: parametros.get_all(nombre)
+            for nombre in parametros
+        }
+    return st.experimental_get_query_params()
+
+
+def _establecer_parametros_url(parametros):
+    if hasattr(st, "query_params"):
+        consulta = st.query_params
+        consulta.clear()
+        for nombre, valores in parametros.items():
+            consulta[nombre] = valores
+        return
+    st.experimental_set_query_params(**parametros)
+
+
+def _forzar_recarga_streamlit():
+    recargar = getattr(st, "rerun", None) or getattr(
+        st,
+        "experimental_rerun",
+        None,
+    )
+    if recargar is None:
+        raise RuntimeError("La versión instalada de Streamlit no permite recargar la app.")
+    recargar()
+
+
+def _capturar_callback_invitacion():
+    parametros = _obtener_parametros_url()
+    tipos = parametros.get("type", [])
+    hashes = parametros.get("token_hash", [])
+    parametros_auth = {
+        "type",
+        "token_hash",
+        "access_token",
+        "refresh_token",
+        "code",
+        "token",
+        "error",
+        "error_description",
+    }
+    if not parametros_auth.intersection(parametros):
+        return
+
+    resto_parametros = {
+        nombre: valores
+        for nombre, valores in parametros.items()
+        if nombre not in parametros_auth
+    }
+    _establecer_parametros_url(resto_parametros)
+    for clave in CLAVES_ESTADO_AUTENTICACION:
+        st.session_state.pop(clave, None)
+    st.session_state.pop("auth_invite_access_token", None)
+    st.session_state.pop("auth_invite_form_error", None)
+    st.session_state.pop("auth_invite_processing_error", None)
+
+    if (
+        len(tipos) == 1
+        and tipos[0] == "invite"
+        and len(hashes) == 1
+        and isinstance(hashes[0], str)
+        and 0 < len(hashes[0]) <= 4096
+    ):
+        st.session_state["auth_invite_token_hash"] = hashes[0]
+    else:
+        st.session_state["auth_invite_invalid"] = True
+    _forzar_recarga_streamlit()
+
+
+def _procesar_configuracion_invitacion(config):
+    password = st.session_state.get("auth_invite_password", "")
+    confirmar = st.session_state.get("auth_invite_password_confirm", "")
+    st.session_state.pop("auth_invite_password", None)
+    st.session_state.pop("auth_invite_password_confirm", None)
+
+    if not password or not confirmar:
+        st.session_state["auth_invite_form_error"] = "Completá ambos campos."
+        return
+    if password != confirmar:
+        st.session_state["auth_invite_form_error"] = (
+            "Las contraseñas no coinciden."
+        )
+        return
+
+    access_token = st.session_state.get("auth_invite_access_token")
+    if not access_token:
+        token_hash = st.session_state.pop("auth_invite_token_hash", None)
+        if not token_hash:
+            st.session_state["auth_invite_invalid"] = True
+            return
+
+        try:
+            respuesta = _solicitud_supabase(
+                config,
+                "/auth/v1/verify",
+                config["publishable_key"],
+                method="POST",
+                data={"token_hash": token_hash, "type": "invite"},
+            )
+        except SupabaseAuthError:
+            st.session_state.pop("auth_invite_access_token", None)
+            st.session_state["auth_invite_processing_error"] = True
+            return
+
+        usuario = respuesta.get("user") or {}
+        access_token = respuesta.get("access_token")
+        if not usuario.get("id") or not access_token:
+            st.session_state.pop("auth_invite_access_token", None)
+            st.session_state["auth_invite_processing_error"] = True
+            return
+        st.session_state["auth_invite_access_token"] = access_token
+
+    try:
+        _solicitud_supabase(
+            config,
+            "/auth/v1/user",
+            config["publishable_key"],
+            method="PUT",
+            data={"password": password},
+            token=access_token,
+        )
+    except SupabaseAuthError as exc:
+        if exc.status_code in (400, 422):
+            st.session_state["auth_invite_form_error"] = (
+                "Supabase rechazó esta contraseña. Revisá los requisitos de "
+                "contraseña del proyecto e intentá con otra; no hace falta "
+                "pedir una nueva invitación."
+            )
+        elif exc.status_code in (401, 403):
+            st.session_state.pop("auth_invite_access_token", None)
+            st.session_state["auth_invite_processing_error"] = True
+        else:
+            st.session_state["auth_invite_form_error"] = (
+                "No se pudo actualizar la contraseña por un error temporal. "
+                "Volvé a intentarlo; si la invitación sigue válida no hace "
+                "falta pedir otra."
+            )
+        return
+
+    st.session_state.pop("auth_invite_access_token", None)
+    st.session_state.pop("auth_invite_token_hash", None)
+    st.session_state.pop("auth_invite_form_error", None)
+    st.session_state.pop("auth_invite_processing_error", None)
+    st.session_state.pop("auth_invite_password", None)
+    st.session_state.pop("auth_invite_password_confirm", None)
+    st.session_state["auth_invite_completed"] = True
+
+
+def _mostrar_callback_invitacion(config):
+    if st.session_state.pop("auth_invite_completed", False):
+        st.success("Contraseña configurada. Ya podés iniciar sesión.")
+        return False
+
+    if st.session_state.pop("auth_invite_processing_error", False):
+        st.title("🔐 Configurar contraseña")
+        st.error(
+            "No se pudo validar la invitación o guardar la contraseña. "
+            "El enlace puede haber vencido o ya haberse usado. Pedile al "
+            "administrador que envíe una nueva invitación."
+        )
+        return True
+
+    if st.session_state.pop("auth_invite_invalid", False):
+        st.title("🔐 Configurar contraseña")
+        st.error("El enlace de invitación está incompleto o no es válido.")
+        st.info("Pedile al administrador que envíe una nueva invitación.")
+        return True
+
+    token_hash = st.session_state.get("auth_invite_token_hash")
+    access_token = st.session_state.get("auth_invite_access_token")
+    if not token_hash and not access_token:
+        return False
+
+    st.title("🔐 Configurar contraseña")
+    st.caption("Elegí una contraseña para activar tu acceso.")
+    error_formulario = st.session_state.pop("auth_invite_form_error", None)
+    if error_formulario:
+        st.error(error_formulario)
+    with st.form("form_configurar_contrasena_invitacion"):
+        st.text_input(
+            "Nueva contraseña",
+            type="password",
+            key="auth_invite_password",
+        )
+        st.text_input(
+            "Confirmar contraseña",
+            type="password",
+            key="auth_invite_password_confirm",
+        )
+        st.form_submit_button(
+            "Guardar contraseña",
+            use_container_width=True,
+            on_click=_procesar_configuracion_invitacion,
+            args=({
+                "url": config["url"],
+                "publishable_key": config["publishable_key"],
+            },),
+        )
+    return True
+
+
+def _mostrar_formulario_acceso(config, aviso=None):
+    st.title("🔐 Iniciar sesión")
+    st.caption("Ingresá con la cuenta que te invitó el administrador.")
+    if aviso:
+        st.error(aviso)
+    with st.form("form_inicio_sesion"):
+        email = st.text_input("Correo electrónico")
+        password = st.text_input("Contraseña", type="password")
+        enviar = st.form_submit_button("Ingresar", use_container_width=True)
+    if not enviar:
+        return False
+    if not email.strip() or not password:
+        st.error("Ingresá el correo y la contraseña.")
+        return False
+    try:
+        respuesta = _solicitud_supabase(
+            config,
+            "/auth/v1/token?grant_type=password",
+            config["publishable_key"],
+            method="POST",
+            data={"email": email.strip(), "password": password},
+        )
+        _guardar_tokens_auth(respuesta)
+        return True
+    except SupabaseAuthError as exc:
+        st.error(f"No se pudo iniciar sesión: {exc}")
+        return False
+
+
+def _verificar_sesion_auth(config):
+    access_token = st.session_state.get("auth_access_token")
+    refresh_token = st.session_state.get("auth_refresh_token")
+    if not access_token or not refresh_token:
+        return None
+
+    try:
+        return _solicitud_supabase(
+            config,
+            "/auth/v1/user",
+            config["publishable_key"],
+            token=access_token,
+        )
+    except SupabaseAuthError as exc:
+        if exc.status_code != 401:
+            raise
+
+    respuesta = _solicitud_supabase(
+        config,
+        "/auth/v1/token?grant_type=refresh_token",
+        config["publishable_key"],
+        method="POST",
+        data={"refresh_token": refresh_token},
+    )
+    _guardar_tokens_auth(respuesta)
+    return _solicitud_supabase(
+        config,
+        "/auth/v1/user",
+        config["publishable_key"],
+        token=st.session_state["auth_access_token"],
+    )
+
+
+def _cargar_perfil_y_permisos(usuario_auth, config):
+    user_id = str(usuario_auth.get("id") or "")
+    email = str(usuario_auth.get("email") or "").strip()
+    if not user_id or not email:
+        raise SupabaseAuthError("Supabase no devolvió la identidad del usuario.")
+
+    es_admin = email.casefold() == config["admin_email"]
+    conn = conectar_db()
+    try:
+        if es_admin:
+            metadata = usuario_auth.get("user_metadata") or {}
+            nombre = str(metadata.get("full_name") or metadata.get("name") or "Administrador")
+            conn.execute(
+                """INSERT INTO public.app_user_profiles AS existing
+                   (user_id, email, full_name, role, is_active)
+                   VALUES (?, ?, ?, 'admin', TRUE)
+                   ON CONFLICT (user_id) DO UPDATE SET
+                       email = EXCLUDED.email,
+                       full_name = CASE
+                           WHEN existing.full_name = ''
+                           THEN EXCLUDED.full_name
+                           ELSE existing.full_name
+                       END,
+                       role = 'admin',
+                       is_active = TRUE""",
+                (user_id, email, nombre),
+            )
+            conn.commit()
+        perfil = conn.execute(
+            "SELECT email, full_name, is_active FROM public.app_user_profiles "
+            "WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not perfil:
+            return None, {}, False
+        permisos = {
+            fila[0]: bool(fila[1])
+            for fila in conn.execute(
+                "SELECT section_key, enabled FROM public.app_user_permissions "
+                "WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        }
+        return {
+            "user_id": user_id,
+            "email": perfil[0],
+            "full_name": perfil[1],
+            "is_active": bool(perfil[2]),
+            "is_admin": es_admin,
+        }, permisos, es_admin
+    finally:
+        conn.close()
+
+
+def _exigir_seccion(section_key):
+    if not IS_CLOUD or st.session_state.get("auth_is_admin"):
+        return
+    permisos = st.session_state.get("auth_permissions", {})
+    if not permisos.get(section_key, False):
+        st.error("No tenés permiso para acceder a esta sección.")
+        st.stop()
+
+
+def _exigir_admin():
+    if IS_CLOUD and not st.session_state.get("auth_is_admin"):
+        st.error("Esta sección está disponible únicamente para el administrador.")
+        st.stop()
+
+
+def _autenticar_web():
+    if not IS_CLOUD:
+        return
+
+    _capturar_callback_invitacion()
+    config = _configuracion_autenticacion()
+    faltantes = [
+        nombre
+        for nombre, valor in (
+            ("DATABASE_URL", _leer_secreto("DATABASE_URL")),
+            ("SUPABASE_URL", config["url"]),
+            (
+                "SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY)",
+                config["publishable_key"],
+            ),
+            (
+                "SUPABASE_SECRET_KEY (o SUPABASE_SERVICE_ROLE_KEY)",
+                config["secret_key"],
+            ),
+            ("ADMIN_EMAIL", config["admin_email"]),
+        )
+        if not valor
+    ]
+    if faltantes or not has_remote_db():
+        if not has_remote_db() and "DATABASE_URL" not in faltantes:
+            faltantes.append("DATABASE_URL o psycopg2-binary")
+        st.error(
+            "Acceso bloqueado: faltan secretos de autenticación o base de datos. "
+            "Configurá: " + ", ".join(faltantes) + "."
+        )
+        st.stop()
+
+    if _mostrar_callback_invitacion(config):
+        st.stop()
+
+    try:
+        conn = conectar_db()
+        try:
+            inicializar_tablas_acceso(conn)
+        finally:
+            conn.close()
+    except Exception as exc:
+        st.error(
+            "No se pudieron preparar las tablas privadas de usuarios. "
+            "Verificá que DATABASE_URL permita crear tablas en el esquema public "
+            f"y referenciar auth.users. Error: {type(exc).__name__}."
+        )
+        st.stop()
+
+    aviso = st.session_state.pop("auth_login_aviso", None)
+    for _ in range(3):
+        if not st.session_state.get("auth_access_token"):
+            if not _mostrar_formulario_acceso(config, aviso):
+                st.stop()
+            aviso = None
+
+        try:
+            usuario_auth = _verificar_sesion_auth(config)
+        except SupabaseAuthError as exc:
+            if exc.status_code is None or exc.status_code >= 500:
+                st.error(f"No se pudo verificar la sesión con Supabase: {exc}")
+                st.stop()
+            _limpiar_sesion_autenticacion()
+            aviso = "La sesión venció o fue revocada. Iniciá sesión nuevamente."
+            continue
+
+        if not usuario_auth:
+            _limpiar_sesion_autenticacion()
+            aviso = "Iniciá sesión para continuar."
+            continue
+
+        try:
+            perfil, permisos, es_admin = _cargar_perfil_y_permisos(
+                usuario_auth,
+                config,
+            )
+        except Exception as exc:
+            st.error(
+                "No se pudo validar el perfil de acceso en la base de datos. "
+                f"Error: {type(exc).__name__}."
+            )
+            st.stop()
+
+        if not perfil:
+            _limpiar_sesion_autenticacion()
+            st.session_state["auth_login_aviso"] = (
+                "Esta cuenta no fue invitada por el administrador. "
+                "No hay registro público."
+            )
+            _forzar_recarga_streamlit()
+        if not perfil["is_active"]:
+            _limpiar_sesion_autenticacion()
+            st.session_state["auth_login_aviso"] = (
+                "La cuenta está desactivada. Contactá al administrador."
+            )
+            _forzar_recarga_streamlit()
+
+        st.session_state["auth_user_id"] = perfil["user_id"]
+        st.session_state["auth_email"] = perfil["email"]
+        st.session_state["auth_full_name"] = perfil["full_name"]
+        st.session_state["auth_is_admin"] = es_admin
+        st.session_state["auth_permissions"] = {
+            clave: bool(permisos.get(clave, False))
+            for clave, _ in SECCIONES_APP
+        }
+        return
+
+    st.error(aviso or "No se pudo validar el acceso.")
+    if not st.session_state.get("auth_access_token"):
+        _mostrar_formulario_acceso(config)
+    st.stop()
+
+
+def _permiso_actual_para_callback(section_key):
+    if not IS_CLOUD:
+        return True
+
+    try:
+        config = _configuracion_autenticacion()
+        usuario_auth = _verificar_sesion_auth(config)
+        if not usuario_auth:
+            _limpiar_sesion_autenticacion()
+            st.error("La sesión venció. Iniciá sesión nuevamente.")
+            return False
+        perfil, permisos, es_admin = _cargar_perfil_y_permisos(
+            usuario_auth,
+            config,
+        )
+    except SupabaseAuthError as exc:
+        st.error(f"No se pudo validar el acceso para esta acción: {exc}")
+        return False
+    except Exception as exc:
+        st.error(
+            "No se pudo validar el acceso para esta acción. "
+            f"Error: {type(exc).__name__}."
+        )
+        return False
+
+    if not perfil or not perfil["is_active"]:
+        _limpiar_sesion_autenticacion()
+        st.error("La cuenta está desactivada o no fue invitada.")
+        return False
+
+    st.session_state["auth_user_id"] = perfil["user_id"]
+    st.session_state["auth_email"] = perfil["email"]
+    st.session_state["auth_full_name"] = perfil["full_name"]
+    st.session_state["auth_is_admin"] = es_admin
+    st.session_state["auth_permissions"] = {
+        clave: bool(permisos.get(clave, False))
+        for clave, _ in SECCIONES_APP
+    }
+
+    if not es_admin and not permisos.get(section_key, False):
+        st.error("Tu acceso a esta sección cambió. La acción no se ejecutó.")
+        return False
+    return True
+
+
+def _proteger_callback(section_key, callback):
+    def callback_protegido(*args, **kwargs):
+        if _permiso_actual_para_callback(section_key):
+            return callback(*args, **kwargs)
+        return None
+
+    return callback_protegido
+
+
+def _guardar_accesos_usuario(user_id, activo, permisos):
+    conn = conectar_db()
+    try:
+        conn.execute(
+            "UPDATE public.app_user_profiles SET is_active = ? "
+            "WHERE user_id = ? AND role = 'common'",
+            (activo, user_id),
+        )
+        conn.execute(
+            "DELETE FROM public.app_user_permissions WHERE user_id = ?",
+            (user_id,),
+        )
+        conn.executemany(
+            "INSERT INTO public.app_user_permissions "
+            "(user_id, section_key, enabled) VALUES (?, ?, ?)",
+            [
+                (user_id, clave, clave in permisos)
+                for clave, _ in SECCIONES_APP
+            ],
+        )
+        conn.commit()
+        persistir_y_sync()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _invitar_usuario(config, nombre, email):
+    if not config.get("app_url"):
+        raise SupabaseAuthError(
+            "Falta configurar APP_URL. La invitación no fue enviada."
+        )
+    secret_key = config["secret_key"]
+    respuesta = _solicitud_supabase(
+        config,
+        "/auth/v1/invite?"
+        + urllib.parse.urlencode({"redirect_to": config["app_url"]}),
+        secret_key,
+        method="POST",
+        data={"email": email, "data": {"full_name": nombre}},
+        token=secret_key if config.get("secret_key_legacy") else None,
+    )
+    usuario = respuesta.get("user") or respuesta
+    user_id = usuario.get("id")
+    if not user_id:
+        raise SupabaseAuthError(
+            "Supabase envió o procesó la invitación, pero no devolvió el ID del usuario."
+        )
+
+    conn = conectar_db()
+    try:
+        conn.execute(
+            """INSERT INTO public.app_user_profiles
+               (user_id, email, full_name, role, is_active)
+               VALUES (?, ?, ?, 'common', TRUE)""",
+            (str(user_id), email, nombre),
+        )
+        conn.executemany(
+            "INSERT INTO public.app_user_permissions "
+            "(user_id, section_key, enabled) VALUES (?, ?, FALSE)",
+            [
+                (str(user_id), clave)
+                for clave, _ in SECCIONES_APP
+            ],
+        )
+        conn.commit()
+        persistir_y_sync()
+    except Exception as exc:
+        conn.rollback()
+        raise RuntimeError(
+            "La invitación de Auth se procesó, pero no se pudo guardar el perfil "
+            "con permisos iniciales. Revisá la cuenta antes de reenviar la invitación."
+        ) from exc
+    finally:
+        conn.close()
+
+
+def _mostrar_administracion_usuarios(config):
+    st.title("🔐 Usuarios y permisos")
+    st.caption(
+        "Los permisos habilitan secciones de la app; los datos del taller son compartidos."
+    )
+    st.info(
+        "Para que el enlace permita configurar la contraseña, la plantilla "
+        "Invite User de Supabase debe dirigir a APP_URL con los parámetros "
+        "token_hash y type=invite. Ver instrucciones en secrets_example.toml."
+    )
+    with st.form("form_invitar_usuario"):
+        nombre = st.text_input("Nombre")
+        email = st.text_input("Correo electrónico")
+        invitar = st.form_submit_button("✉️ Invitar usuario", use_container_width=True)
+    if invitar:
+        email = email.strip().casefold()
+        if not nombre.strip() or not email or "@" not in email:
+            st.error("Ingresá un nombre y un correo electrónico válido.")
+        elif email == config["admin_email"]:
+            st.error("El correo administrador no se puede invitar como usuario común.")
+        elif not config.get("app_url"):
+            st.error(
+                "Falta configurar APP_URL en Streamlit Secrets o en variables "
+                "de entorno. No se envió la invitación."
+            )
+        else:
+            try:
+                _invitar_usuario(config, nombre.strip(), email)
+                st.success(
+                    "Invitación enviada. El invitado podrá configurar su "
+                    "contraseña si la plantilla Invite User de Supabase está "
+                    "configurada para el callback de la app."
+                )
+            except (SupabaseAuthError, RuntimeError) as exc:
+                st.error(f"No se pudo completar la invitación: {exc}")
+
+    conn = conectar_db()
+    try:
+        usuarios = conn.execute(
+            "SELECT user_id, email, full_name, is_active FROM public.app_user_profiles "
+            "WHERE role = 'common' ORDER BY lower(full_name), lower(email)"
+        ).fetchall()
+        for user_id, email_usuario, nombre_usuario, activo in usuarios:
+            permisos_guardados = {
+                fila[0]
+                for fila in conn.execute(
+                    "SELECT section_key FROM public.app_user_permissions "
+                    "WHERE user_id = ? AND enabled = TRUE",
+                    (user_id,),
+                ).fetchall()
+            }
+            st.markdown(f"### {nombre_usuario or email_usuario}")
+            st.caption(email_usuario)
+            with st.form(f"form_accesos_{user_id}"):
+                activo_nuevo = st.checkbox(
+                    "Cuenta activa",
+                    value=bool(activo),
+                    key=f"activo_{user_id}",
+                )
+                permisos_nuevos = {
+                    clave
+                    for clave, etiqueta in SECCIONES_APP
+                    if st.checkbox(
+                        etiqueta,
+                        value=clave in permisos_guardados,
+                        key=f"permiso_{user_id}_{clave}",
+                    )
+                }
+                guardar = st.form_submit_button("Guardar accesos")
+            if guardar:
+                try:
+                    _guardar_accesos_usuario(
+                        str(user_id),
+                        activo_nuevo,
+                        permisos_nuevos,
+                    )
+                    st.success("Accesos actualizados.")
+                except Exception as exc:
+                    st.error(
+                        "No se pudieron guardar los permisos. "
+                        f"Error: {type(exc).__name__}."
+                    )
+    finally:
+        conn.close()
+
 
 # --- FUNCIONES GENERADORAS DE PDF ---
 
@@ -665,6 +1462,12 @@ def enviar_pdf_por_email(datos_pdf, nombre_archivo, asunto):
         return False, "No se pudo enviar el correo. Verificá la configuración SMTP."
 
 # --- MANEJO SEGURO DE ESTADOS DE SESIÓN ---
+if IS_CLOUD:
+    _autenticar_web()
+else:
+    DB_PATH = ensure_database_file()
+    ensure_remote_restore(DB_PATH)
+
 if "navegacion" not in st.session_state: st.session_state.navegacion = "🏠 Inicio semanal"
 if "paso_ingreso" not in st.session_state: st.session_state.paso_ingreso = "registro_inicial"
 if "ultimo_ingreso_id" not in st.session_state: st.session_state.ultimo_ingreso_id = None
@@ -691,13 +1494,41 @@ lista_opciones_menu = [
     "📈 Reportes y Facturación"
 ]
 
-try:
-    idx_defecto = lista_opciones_menu.index(st.session_state.navegacion)
-except ValueError:
-    idx_defecto = 0
+if IS_CLOUD:
+    if st.session_state.get("auth_is_admin"):
+        lista_opciones_menu.append(PANTALLA_USUARIOS)
+    else:
+        lista_opciones_menu = [
+            etiqueta
+            for etiqueta in lista_opciones_menu
+            if st.session_state["auth_permissions"].get(
+                ETIQUETA_A_SECCION[etiqueta],
+                False,
+            )
+        ]
+
+if not lista_opciones_menu:
+    st.info("No tenés secciones habilitadas. Contactá al administrador.")
+    st.sidebar.caption(st.session_state["auth_email"])
+    st.sidebar.button(
+        "Cerrar sesión",
+        key="cerrar_sesion_sin_permisos",
+        on_click=_limpiar_sesion_autenticacion,
+    )
+    st.stop()
+
+if st.session_state.navegacion not in lista_opciones_menu:
+    st.session_state.navegacion = lista_opciones_menu[0]
+    st.session_state.pop("detalle_agenda", None)
 
 st.sidebar.title("🔧 Sistema Taller")
-st.sidebar.caption("Navegación principal")
+if IS_CLOUD:
+    st.sidebar.caption(
+        f"{st.session_state['auth_full_name'] or st.session_state['auth_email']} · "
+        f"{'Administrador' if st.session_state['auth_is_admin'] else 'Usuario común'}"
+    )
+else:
+    st.sidebar.caption("Navegación principal")
 for opcion_menu in lista_opciones_menu:
     es_seleccionada = st.session_state.navegacion == opcion_menu
     if st.sidebar.button(
@@ -707,12 +1538,30 @@ for opcion_menu in lista_opciones_menu:
         type="primary" if es_seleccionada else "secondary",
     ):
         st.session_state.navegacion = opcion_menu
+if IS_CLOUD:
+    st.sidebar.button(
+        "Cerrar sesión",
+        key="cerrar_sesion",
+        on_click=_limpiar_sesion_autenticacion,
+    )
 
 menu_elegido = st.session_state.navegacion
 
 
 def cambiar_pagina(nueva_pagina):
     st.session_state.navegacion = nueva_pagina
+
+
+if menu_elegido == PANTALLA_USUARIOS:
+    _exigir_admin()
+else:
+    _exigir_seccion(ETIQUETA_A_SECCION[menu_elegido])
+
+if menu_elegido != PANTALLA_USUARIOS:
+    DB_PATH = ensure_database_file()
+    conn_inicial = conectar_db()
+    inicializar_db(conn_inicial)
+    conn_inicial.close()
 
 
 _ESTADOS_CHECKLIST = {
@@ -915,6 +1764,11 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
         "mantenimiento": "controles_mantenimiento",
         "salida": "controles_salida",
     }[tipo]
+    seccion = {
+        "controles_ingreso": "ingreso_equipo",
+        "controles_mantenimiento": "ejecucion_mantenimiento",
+        "controles_salida": "entrega_equipo",
+    }[tabla]
     estados_base = (
         _ESTADOS_CHECKLIST.get(tabla)
         or _ESTADOS_MANTENIMIENTO.get("mantenimiento")
@@ -1006,7 +1860,10 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
                     st.checkbox(
                         "Completo",
                         key=completado_key,
-                        on_change=_persistir_respuesta_checklist,
+                        on_change=_proteger_callback(
+                            seccion,
+                            _persistir_respuesta_checklist,
+                        ),
                         args=argumentos,
                         disabled=bool(
                             respuesta
@@ -1026,7 +1883,10 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
                         estados,
                         index=indice_estado,
                         key=estado_key,
-                        on_change=_guardar_estado_checklist,
+                        on_change=_proteger_callback(
+                            seccion,
+                            _guardar_estado_checklist,
+                        ),
                         args=argumentos,
                         label_visibility="collapsed",
                         placeholder="Elegí condición",
@@ -1040,7 +1900,10 @@ def _mostrar_checklist_planilla(tipo, ingreso_id, controles, respuestas):
                             "Observaciones",
                             key=observaciones_key,
                             height=68,
-                            on_change=_guardar_observaciones_checklist,
+                            on_change=_proteger_callback(
+                                seccion,
+                                _guardar_observaciones_checklist,
+                            ),
                             args=argumentos,
                             label_visibility="collapsed",
                             placeholder="Observaciones (opcional)",
@@ -1840,7 +2703,12 @@ def colorear_estados(val):
 # ==========================================
 # 1. PANTALLA: AGENDA SEMANAL
 # ==========================================
-if menu_elegido == "🏠 Inicio semanal":
+if menu_elegido == PANTALLA_USUARIOS:
+    _exigir_admin()
+    _mostrar_administracion_usuarios(_configuracion_autenticacion())
+
+elif menu_elegido == "🏠 Inicio semanal":
+    _exigir_seccion("inicio_semanal")
     st.markdown("<h2 class='agenda-title'>🏠 Agenda semanal del taller</h2>", unsafe_allow_html=True)
     hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
     conn = conectar_db()
@@ -1956,6 +2824,7 @@ if menu_elegido == "🏠 Inicio semanal":
 # 2. PANTALLA: TABLERO TALLER (TRABAJOS INTERNOS)
 # ==========================================
 elif menu_elegido == "📊 Tablero Taller":
+    _exigir_seccion("tablero_taller")
     st.title("📊 Tablero Taller: Gestión de Trabajos Internos")
     _mostrar_volver_a_agenda("interno")
     conn = conectar_db()
@@ -2055,6 +2924,7 @@ elif menu_elegido == "📊 Tablero Taller":
 # 2. PANTALLA: TABLERO DE EQUIPOS
 # ==========================================
 elif menu_elegido == "📊 Tablero de Equipos":
+    _exigir_seccion("tablero_equipos")
     st.title("🚜 Estado General y Flujo Técnico")
     _mostrar_volver_a_agenda("mantenimiento")
     conn = conectar_db()
@@ -2101,7 +2971,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 "➡️ Retomar Tarea Seleccionada",
                 key="retomar_tarea_incompleta",
                 use_container_width=True,
-                on_click=retomar_inspeccion,
+                on_click=_proteger_callback(
+                    "tablero_equipos",
+                    retomar_inspeccion,
+                ),
                 args=(id_retomar,),
             )
             db = conectar_db()
@@ -2121,7 +2994,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     "🛠️ Continuar a mantenimiento",
                     key=f"continuar_mantenimiento_inspeccion_{id_retomar}",
                     use_container_width=True,
-                    on_click=continuar_mantenimiento_desde_inspeccion,
+                    on_click=_proteger_callback(
+                        "tablero_equipos",
+                        continuar_mantenimiento_desde_inspeccion,
+                    ),
                     args=(id_retomar,),
                 )
             mensaje_reanudacion = st.session_state.get("mensaje_reanudacion")
@@ -2132,7 +3008,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 "➡️ Retomar Tarea Seleccionada",
                 key="retomar_tarea_incompleta",
                 use_container_width=True,
-                on_click=preparar_mantenimiento,
+                on_click=_proteger_callback(
+                    "tablero_equipos",
+                    preparar_mantenimiento,
+                ),
                 args=(id_retomar,),
             )
         else:
@@ -2140,7 +3019,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                 "➡️ Retomar Tarea Seleccionada",
                 key="retomar_tarea_incompleta",
                 use_container_width=True,
-                on_click=retomar_checklist_salida,
+                on_click=_proteger_callback(
+                    "tablero_equipos",
+                    retomar_checklist_salida,
+                ),
                 args=(id_retomar,),
             )
 
@@ -2312,7 +3194,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     "🛠️ Iniciar Mantenimiento",
                     use_container_width=True,
                     key=f"iniciar_mantenimiento_{id_buscado}",
-                    on_click=preparar_mantenimiento,
+                    on_click=_proteger_callback(
+                        "tablero_equipos",
+                        preparar_mantenimiento,
+                    ),
                     args=(id_buscado,),
                 )
 
@@ -2323,7 +3208,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     "🔄 Reabrir mantenimiento para corregir",
                     use_container_width=True,
                     key=f"reabrir_mantenimiento_{id_buscado}",
-                    on_click=preparar_mantenimiento,
+                    on_click=_proteger_callback(
+                        "tablero_equipos",
+                        preparar_mantenimiento,
+                    ),
                     args=(id_buscado,),
                 )
 
@@ -2331,7 +3219,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     "📄 Generar y guardar reporte PDF",
                     key=f"generar_archivar_reporte_{id_buscado}",
                     use_container_width=True,
-                    on_click=generar_reportes,
+                    on_click=_proteger_callback(
+                        "tablero_equipos",
+                        generar_reportes,
+                    ),
                     args=(id_buscado,),
                 )
                 mensaje_pdf = st.session_state.pop("mensaje_pdf", None)
@@ -2349,7 +3240,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     "📋 Iniciar Checklist de Salida / Entrega",
                     use_container_width=True,
                     key=f"iniciar_salida_{id_buscado}",
-                    on_click=iniciar_checklist_salida,
+                    on_click=_proteger_callback(
+                        "tablero_equipos",
+                        iniciar_checklist_salida,
+                    ),
                     args=(id_buscado,),
                 )
 
@@ -2359,7 +3253,10 @@ elif menu_elegido == "📊 Tablero de Equipos":
                     "📄 Generar y guardar reportes PDF",
                     key=f"generar_archivar_reportes_entrega_{id_buscado}",
                     use_container_width=True,
-                    on_click=generar_reportes,
+                    on_click=_proteger_callback(
+                        "tablero_equipos",
+                        generar_reportes,
+                    ),
                     args=(id_buscado, True),
                 )
                 mensaje_pdf = st.session_state.pop("mensaje_pdf", None)
@@ -2373,6 +3270,7 @@ elif menu_elegido == "📊 Tablero de Equipos":
 # 3. PANTALLA: INGRESO DE EQUIPO
 # ==========================================
 elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
+    _exigir_seccion("ingreso_equipo")
     st.title("🚜 Recepción de Equipos y Diagnóstico")
     conn = conectar_db()
     controles_ingreso = pd.read_sql_query(
@@ -2465,7 +3363,10 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
                 "Continuar a fallas adicionales →",
                 key=f"continuar_fallas_{ingreso_id}",
                 use_container_width=True,
-                on_click=avanzar_paso_ingreso,
+                on_click=_proteger_callback(
+                    "ingreso_equipo",
+                    avanzar_paso_ingreso,
+                ),
                 args=("fallas_adicionales",),
                 disabled=progreso < total_controles,
             )
@@ -2540,6 +3441,7 @@ elif menu_elegido == "🚜 Ingreso de Equipo (Guiado)":
 # 4. PANTALLA: EJECUCIÓN DE MANTENIMIENTO
 # ==========================================
 elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
+    _exigir_seccion("ejecucion_mantenimiento")
     st.title("🛠️ Checklist de Mantenimiento")
     ingreso_id = st.session_state.mant_ingreso_id
     if not ingreso_id:
@@ -2596,7 +3498,10 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                     "Volver al Tablero de Equipos",
                     use_container_width=True,
                     key=f"btn_volver_tablero_mantenimiento_{ingreso_id}",
-                    on_click=pausar_mantenimiento,
+                    on_click=_proteger_callback(
+                        "ejecucion_mantenimiento",
+                        pausar_mantenimiento,
+                    ),
                 )
             elif not plan:
                 st.error("No hay pasos configurados para este mantenimiento.")
@@ -2648,7 +3553,10 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                         "⏸️ Pausar Tareas",
                         use_container_width=True,
                         key=f"btn_pausar_tareas_{ingreso_id}",
-                        on_click=pausar_mantenimiento,
+                        on_click=_proteger_callback(
+                            "ejecucion_mantenimiento",
+                            pausar_mantenimiento,
+                        ),
                     )
 
                 controles_mantenimiento = [
@@ -2670,7 +3578,10 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                 st.text_area(
                     "Hallazgos adicionales, insumos u observaciones finales (opcional):",
                     key=key_hallazgos,
-                    on_change=guardar_hallazgos_mantenimiento,
+                    on_change=_proteger_callback(
+                        "ejecucion_mantenimiento",
+                        guardar_hallazgos_mantenimiento,
+                    ),
                     args=(ingreso_id, key_hallazgos),
                 )
                 st.button(
@@ -2678,7 +3589,10 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
                     key=f"finalizar_mantenimiento_{ingreso_id}",
                     use_container_width=True,
                     disabled=progreso < total_controles,
-                    on_click=finalizar_mantenimiento,
+                    on_click=_proteger_callback(
+                        "ejecucion_mantenimiento",
+                        finalizar_mantenimiento,
+                    ),
                     args=(ingreso_id,),
                 )
                 mostrar_descargas_pdf(ingreso_id)
@@ -2692,6 +3606,7 @@ elif menu_elegido == "🛠️ Ejecución de Mantenimiento":
 # 5. PANTALLA: CHECKLIST DE SALIDA
 # ==========================================
 elif menu_elegido == "✅ Entrega de Equipo (Salida)":
+    _exigir_seccion("entrega_equipo")
     st.title("✅ Control de Calidad y Entrega")
     conn = conectar_db()
     controles_salida = pd.read_sql_query(
@@ -2752,7 +3667,10 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                 "Volver al Tablero",
                 use_container_width=True,
                 key=f"btn_volver_tablero_entrega_{ingreso_id}",
-                on_click=volver_desde_checklist_salida,
+                on_click=_proteger_callback(
+                    "entrega_equipo",
+                    volver_desde_checklist_salida,
+                ),
             )
         elif estado_ingreso[0] != "Checklist Salida en Proceso":
             st.info("No hay un Checklist de Salida activo para este equipo. Iniciálo desde el Tablero de Equipos.")
@@ -2775,7 +3693,10 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
                 key=f"finalizar_salida_{ingreso_id}",
                 use_container_width=True,
                 disabled=progreso < total_controles,
-                on_click=finalizar_checklist_salida,
+                on_click=_proteger_callback(
+                    "entrega_equipo",
+                    finalizar_checklist_salida,
+                ),
                 args=(ingreso_id,),
             )
             mensaje_error = st.session_state.get(f"error_salida_{ingreso_id}")
@@ -2787,6 +3708,7 @@ elif menu_elegido == "✅ Entrega de Equipo (Salida)":
 # 6. PANTALLA: ARCHIVO DE COMPROBANTES 
 # =========================================================
 elif menu_elegido == "🗂️ Archivo de PDFs":
+    _exigir_seccion("archivo_pdfs")
     st.title("🗂️ Archivo de Comprobantes")
     st.write("Desde acá podés descargar los PDF que estén disponibles en la carpeta local `comprobantes`.")
     st.info("En Streamlit Cloud, esta carpeta es temporal: los archivos no quedan archivados permanentemente.")
@@ -2833,6 +3755,7 @@ elif menu_elegido == "🗂️ Archivo de PDFs":
 # 7. PANTALLA: LISTA DE COMPRAS
 # ==========================================
 elif menu_elegido == "🛒 Lista de Compras":
+    _exigir_seccion("lista_compras")
     st.markdown(
         "<h2 class='compras-title'>🛒 Gestión de Insumos y Repuestos</h2>",
         unsafe_allow_html=True,
@@ -2944,7 +3867,10 @@ elif menu_elegido == "🛒 Lista de Compras":
                             "Fecha necesaria",
                             format="DD/MM/YYYY",
                             key=widget_key,
-                            on_change=_guardar_fecha_necesaria_compra,
+                            on_change=_proteger_callback(
+                                "lista_compras",
+                                _guardar_fecha_necesaria_compra,
+                            ),
                             args=(compra["id"], widget_key),
                         )
                         if fecha_necesaria is None:
@@ -3014,6 +3940,7 @@ elif menu_elegido == "🛒 Lista de Compras":
 # 8. PANTALLA: TRABAJOS CLIENTES
 # ==========================================
 elif menu_elegido == "💼 Trabajos Clientes":
+    _exigir_seccion("trabajos_clientes")
     st.title("💼 Gestión de Trabajos en Clientes")
     _mostrar_volver_a_agenda("cliente")
     conn = conectar_db()
@@ -3081,6 +4008,7 @@ elif menu_elegido == "💼 Trabajos Clientes":
 # 9. PANTALLA: CONFIGURACIÓN GENERAL
 # ==========================================
 elif menu_elegido == "⚙️ Configuración General":
+    _exigir_seccion("configuracion_general")
     st.title("⚙️ Configurador de Listas de Tareas")
     conn = conectar_db()
     
@@ -3130,6 +4058,7 @@ elif menu_elegido == "⚙️ Configuración General":
 # 10. PANTALLA: PERSONAL MECÁNICO
 # ==========================================
 elif menu_elegido == "👥 Personal Mecánico":
+    _exigir_seccion("personal_mecanico")
     st.title("👥 Personal Técnico del Taller")
     conn = conectar_db()
     with st.form("alta_mec"):
@@ -3146,6 +4075,7 @@ elif menu_elegido == "👥 Personal Mecánico":
 # 11. PANTALLA: REPORTES Y FACTURACIÓN
 # ==========================================
 elif menu_elegido == "📈 Reportes y Facturación":
+    _exigir_seccion("reportes_facturacion")
     st.title("📈 Reporte Mensual de Trabajos")
     st.write("Acá podés generar el detalle unificado de todos los trabajos terminados (Taller, Externos e Internos) para exportarlos a Excel y facilitar la facturación.")
     
