@@ -1096,6 +1096,99 @@ def _guardar_accesos_usuario(user_id, activo, permisos):
         conn.close()
 
 
+def _guardar_perfil_invitado(user_id, email, nombre):
+    conn = conectar_db()
+    try:
+        conn.execute(
+            """INSERT INTO public.app_user_profiles AS existing
+               (user_id, email, full_name, role, is_active)
+               VALUES (?, ?, ?, 'common', TRUE)
+               ON CONFLICT (user_id) DO UPDATE SET
+                   email = CASE
+                       WHEN existing.email = '' THEN EXCLUDED.email
+                       ELSE existing.email
+                   END,
+                   full_name = CASE
+                       WHEN existing.full_name = '' THEN EXCLUDED.full_name
+                       ELSE existing.full_name
+                   END,
+                   role = 'common'""",
+            (str(user_id), email, nombre),
+        )
+        conn.executemany(
+            """INSERT INTO public.app_user_permissions
+               (user_id, section_key, enabled) VALUES (?, ?, FALSE)
+               ON CONFLICT (user_id, section_key) DO NOTHING""",
+            [
+                (str(user_id), clave)
+                for clave, _ in SECCIONES_APP
+            ],
+        )
+        conn.commit()
+        persistir_y_sync()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _buscar_usuario_auth_existente(config, email):
+    secret_key = config.get("secret_key")
+    if not secret_key:
+        raise SupabaseAuthError(
+            "Falta la clave administrativa de Supabase para buscar usuarios."
+        )
+
+    por_pagina = 100
+    pagina = 1
+    encontrados = []
+    while True:
+        endpoint = "/auth/v1/admin/users?" + urllib.parse.urlencode(
+            {"page": pagina, "per_page": por_pagina}
+        )
+        respuesta = _solicitud_supabase(
+            config,
+            endpoint,
+            secret_key,
+            method="GET",
+            token=secret_key if config.get("secret_key_legacy") else None,
+        )
+        usuarios = respuesta.get("users")
+        if not isinstance(usuarios, list):
+            raise SupabaseAuthError(
+                "Supabase devolvió un listado de usuarios con formato inesperado."
+            )
+        encontrados.extend(
+            usuario
+            for usuario in usuarios
+            if isinstance(usuario, dict)
+            and str(usuario.get("email") or "").casefold() == email.casefold()
+        )
+        if len(encontrados) > 1:
+            raise SupabaseAuthError(
+                "Supabase devolvió más de una cuenta con ese correo; "
+                "no se recuperó ningún perfil."
+            )
+        if encontrados or len(usuarios) < por_pagina:
+            break
+        pagina += 1
+
+    return encontrados[0] if encontrados else None
+
+
+def _diagnostico_error_perfil(exc):
+    causa = exc.__cause__ or exc
+    detalles = [type(causa).__name__]
+    if isinstance(causa, PsycopgError):
+        if causa.pgcode:
+            detalles.append(f"SQLSTATE {causa.pgcode}")
+        restriccion = getattr(getattr(causa, "diag", None), "constraint_name", None)
+        if restriccion:
+            detalles.append(f"restricción {restriccion}")
+    return "; ".join(detalles)
+
+
 def _invitar_usuario(config, nombre, email):
     if not config.get("app_url"):
         raise SupabaseAuthError(
@@ -1118,35 +1211,24 @@ def _invitar_usuario(config, nombre, email):
             "Supabase envió o procesó la invitación, pero no devolvió el ID del usuario."
         )
 
-    conn = conectar_db()
+    st.session_state["auth_pending_profile_save"] = {
+        "user_id": str(user_id),
+        "email": email,
+        "full_name": nombre,
+    }
     try:
-        conn.execute(
-            """INSERT INTO public.app_user_profiles
-               (user_id, email, full_name, role, is_active)
-               VALUES (?, ?, ?, 'common', TRUE)""",
-            (str(user_id), email, nombre),
-        )
-        conn.executemany(
-            "INSERT INTO public.app_user_permissions "
-            "(user_id, section_key, enabled) VALUES (?, ?, FALSE)",
-            [
-                (str(user_id), clave)
-                for clave, _ in SECCIONES_APP
-            ],
-        )
-        conn.commit()
-        persistir_y_sync()
+        _guardar_perfil_invitado(user_id, email, nombre)
     except Exception as exc:
-        conn.rollback()
         raise RuntimeError(
             "La invitación de Auth se procesó, pero no se pudo guardar el perfil "
-            "con permisos iniciales. Revisá la cuenta antes de reenviar la invitación."
+            "con permisos iniciales. Podés reintentar el guardado sin reenviar "
+            "la invitación."
         ) from exc
-    finally:
-        conn.close()
+    st.session_state.pop("auth_pending_profile_save", None)
 
 
 def _mostrar_administracion_usuarios(config):
+    _exigir_admin()
     st.title("🔐 Usuarios y permisos")
     st.caption(
         "Los permisos habilitan secciones de la app; los datos del taller son compartidos."
@@ -1156,10 +1238,15 @@ def _mostrar_administracion_usuarios(config):
         "Invite User de Supabase debe dirigir a APP_URL con los parámetros "
         "token_hash y type=invite. Ver instrucciones en secrets_example.toml."
     )
+    pendiente = st.session_state.get("auth_pending_profile_save")
     with st.form("form_invitar_usuario"):
         nombre = st.text_input("Nombre")
         email = st.text_input("Correo electrónico")
-        invitar = st.form_submit_button("✉️ Invitar usuario", use_container_width=True)
+        invitar = st.form_submit_button(
+            "✉️ Invitar usuario",
+            use_container_width=True,
+            disabled=bool(pendiente),
+        )
     if invitar:
         email = email.strip().casefold()
         if not nombre.strip() or not email or "@" not in email:
@@ -1180,7 +1267,137 @@ def _mostrar_administracion_usuarios(config):
                     "configurada para el callback de la app."
                 )
             except (SupabaseAuthError, RuntimeError) as exc:
-                st.error(f"No se pudo completar la invitación: {exc}")
+                mensaje = f"No se pudo completar la invitación: {exc}"
+                if isinstance(exc, RuntimeError) and exc.__cause__:
+                    mensaje += (
+                        f" Diagnóstico: "
+                        f"{_diagnostico_error_perfil(exc)}."
+                    )
+                st.error(mensaje)
+
+    if IS_CLOUD and st.session_state.get("auth_is_admin"):
+        st.subheader("Recuperar cuenta existente de Supabase Auth")
+        st.caption(
+            "Busca una cuenta ya creada en Supabase Auth. No crea cuentas ni "
+            "vuelve a enviar invitaciones."
+        )
+        pendiente = st.session_state.get("auth_pending_profile_save")
+        with st.form("form_recuperar_usuario_auth"):
+            email_recuperar = st.text_input(
+                "Correo de la cuenta existente",
+                value="fuerzaxtecnica@gmail.com",
+            )
+            recuperar = st.form_submit_button(
+                "Buscar y recuperar perfil",
+                use_container_width=True,
+                disabled=bool(pendiente),
+            )
+        if recuperar:
+            email_recuperar = email_recuperar.strip().casefold()
+            if not email_recuperar or "@" not in email_recuperar:
+                st.error("Ingresá un correo electrónico válido.")
+            elif email_recuperar == config["admin_email"]:
+                st.error(
+                    "La cuenta administradora no se puede recuperar como "
+                    "usuario común."
+                )
+            else:
+                try:
+                    usuario_auth = _buscar_usuario_auth_existente(
+                        config,
+                        email_recuperar,
+                    )
+                except SupabaseAuthError as exc:
+                    status = (
+                        f", HTTP {exc.status_code}"
+                        if exc.status_code is not None
+                        else ""
+                    )
+                    st.error(
+                        "No se pudo buscar la cuenta existente en Supabase Auth "
+                        f"({type(exc).__name__}{status}): {exc}"
+                    )
+                except Exception as exc:
+                    st.error(
+                        "No se pudo buscar la cuenta existente. "
+                        f"Diagnóstico: {_diagnostico_error_perfil(exc)}."
+                    )
+                else:
+                    if not usuario_auth:
+                        st.error(
+                            "No se encontró una cuenta existente con ese correo "
+                            "en Supabase Auth. No se creó una cuenta ni se envió "
+                            "una invitación."
+                        )
+                    elif not usuario_auth.get("id"):
+                        st.error(
+                            "Supabase encontró la cuenta, pero no devolvió su ID. "
+                            "No se guardó ningún perfil."
+                        )
+                    else:
+                        metadata = usuario_auth.get("user_metadata") or {}
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                        pendiente = {
+                            "user_id": str(usuario_auth["id"]),
+                            "email": email_recuperar,
+                            "full_name": str(
+                                metadata.get("full_name")
+                                or metadata.get("name")
+                                or ""
+                            ).strip(),
+                        }
+                        st.session_state["auth_pending_profile_save"] = pendiente
+                        try:
+                            _guardar_perfil_invitado(
+                                pendiente["user_id"],
+                                pendiente["email"],
+                                pendiente["full_name"],
+                            )
+                        except Exception as exc:
+                            st.error(
+                                "No se pudo guardar el perfil recuperado. "
+                                f"Diagnóstico: {_diagnostico_error_perfil(exc)}."
+                            )
+                        else:
+                            st.session_state.pop(
+                                "auth_pending_profile_save",
+                                None,
+                            )
+                            st.success(
+                                "Cuenta existente recuperada. Se guardó el perfil "
+                                "común y se completaron únicamente los permisos "
+                                "faltantes como deshabilitados. No se envió otra "
+                                "invitación."
+                            )
+
+    pendiente = st.session_state.get("auth_pending_profile_save")
+    if pendiente:
+        st.warning(
+            "La invitación ya fue procesada por Supabase, pero falta guardar "
+            f"el perfil de {pendiente['email']}. El reintento no enviará otro correo."
+        )
+        if st.button(
+            "Reintentar guardado del perfil",
+            key="reintentar_perfil_invitado",
+        ):
+            try:
+                _guardar_perfil_invitado(
+                    pendiente["user_id"],
+                    pendiente["email"],
+                    pendiente["full_name"],
+                )
+            except Exception as exc:
+                st.error(
+                    "No se pudo guardar el perfil. "
+                    f"Diagnóstico: {_diagnostico_error_perfil(exc)}."
+                )
+            else:
+                st.session_state.pop("auth_pending_profile_save", None)
+                st.success(
+                    "Perfil y permisos iniciales guardados. "
+                    "No se envió otra invitación."
+                )
 
     conn = conectar_db()
     try:
