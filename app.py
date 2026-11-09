@@ -741,20 +741,16 @@ def _mostrar_callback_invitacion(config):
     return True
 
 
-def _mostrar_formulario_acceso(config, aviso=None):
-    st.title("🔐 Iniciar sesión")
-    st.caption("Ingresá con la cuenta que te invitó el administrador.")
-    if aviso:
-        st.error(aviso)
-    with st.form("form_inicio_sesion"):
-        email = st.text_input("Correo electrónico")
-        password = st.text_input("Contraseña", type="password")
-        enviar = st.form_submit_button("Ingresar", use_container_width=True)
-    if not enviar:
-        return False
+def _procesar_inicio_sesion(config):
+    email = (st.session_state.get("auth_login_email") or "").strip()
+    password = st.session_state.get("auth_login_password") or ""
+    st.session_state.pop("auth_login_password", None)
+
     if not email.strip() or not password:
-        st.error("Ingresá el correo y la contraseña.")
-        return False
+        st.session_state["auth_login_error"] = (
+            "Ingresá el correo y la contraseña."
+        )
+        return
     try:
         respuesta = _solicitud_supabase(
             config,
@@ -764,10 +760,42 @@ def _mostrar_formulario_acceso(config, aviso=None):
             data={"email": email.strip(), "password": password},
         )
         _guardar_tokens_auth(respuesta)
-        return True
+        st.session_state.pop("auth_login_error", None)
     except SupabaseAuthError as exc:
-        st.error(f"No se pudo iniciar sesión: {exc}")
-        return False
+        st.session_state.pop("auth_access_token", None)
+        st.session_state.pop("auth_refresh_token", None)
+        st.session_state.pop("auth_user_id", None)
+        st.session_state.pop("auth_email", None)
+        st.session_state["auth_login_error"] = (
+            f"No se pudo iniciar sesión: {exc}"
+        )
+
+
+def _mostrar_formulario_acceso(config, aviso=None):
+    st.title("🔐 Iniciar sesión")
+    st.caption("Ingresá con la cuenta que te invitó el administrador.")
+    if aviso:
+        st.error(aviso)
+    error_login = st.session_state.pop("auth_login_error", None)
+    if error_login:
+        st.error(error_login)
+    with st.form("form_inicio_sesion"):
+        st.text_input("Correo electrónico", key="auth_login_email")
+        st.text_input(
+            "Contraseña",
+            type="password",
+            key="auth_login_password",
+        )
+        st.form_submit_button(
+            "Ingresar",
+            use_container_width=True,
+            on_click=_procesar_inicio_sesion,
+            args=({
+                "url": config["url"],
+                "publishable_key": config["publishable_key"],
+            },),
+        )
+    return False
 
 
 def _verificar_sesion_auth(config):
