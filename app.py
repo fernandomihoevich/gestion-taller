@@ -1115,7 +1115,7 @@ def _guardar_perfil_invitado(user_id, email, nombre):
                    role = 'common'""",
             (str(user_id), email, nombre),
         )
-        conn.executemany(
+        conn.cursor().executemany(
             """INSERT INTO public.app_user_permissions
                (user_id, section_key, enabled) VALUES (?, ?, FALSE)
                ON CONFLICT (user_id, section_key) DO NOTHING""",
