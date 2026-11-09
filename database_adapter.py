@@ -299,6 +299,28 @@ def _migrar_fechas_mantenimiento(cursor, is_postgresql):
         )
 
 
+def _migrar_fecha_necesaria_compras(cursor, is_postgresql):
+    columna = "fecha_necesaria"
+    if is_postgresql:
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+            ("public", "lista_compras", columna),
+        )
+        existe = cursor.fetchone() is not None
+        if not existe:
+            cursor.execute(
+                "ALTER TABLE public.lista_compras "
+                "ADD COLUMN IF NOT EXISTS fecha_necesaria TEXT"
+            )
+        return
+
+    cursor.execute("PRAGMA table_info(lista_compras)")
+    existentes = {fila[1] for fila in cursor.fetchall()}
+    if columna not in existentes:
+        cursor.execute("ALTER TABLE lista_compras ADD COLUMN fecha_necesaria TEXT")
+
+
 def _remote_db_is_empty(db_url=None):
     """Comprueba si la base de datos remota tiene tablas en el schema public."""
     psy = _import_psycopg2()
@@ -701,7 +723,8 @@ def inicializar_db(conn):
                 detalle TEXT,
                 cantidad TEXT NOT NULL,
                 fecha_carga TEXT,
-                estado TEXT NOT NULL
+                estado TEXT NOT NULL,
+                fecha_necesaria TEXT
             )""",
             
             """CREATE TABLE IF NOT EXISTS trabajos_clientes (
@@ -721,6 +744,7 @@ def inicializar_db(conn):
                     print(f"⚠️ Error creando tabla: {e}")
 
         _migrar_fechas_mantenimiento(cursor, is_postgresql=True)
+        _migrar_fecha_necesaria_compras(cursor, is_postgresql=True)
         
         # Insertar datos iniciales
         cursor.execute("SELECT COUNT(*) FROM mecanicos")
@@ -839,7 +863,8 @@ def inicializar_db(conn):
                 detalle TEXT,
                 cantidad TEXT NOT NULL,
                 fecha_carga TEXT,
-                estado TEXT NOT NULL
+                estado TEXT NOT NULL,
+                fecha_necesaria TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS trabajos_clientes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -857,6 +882,7 @@ def inicializar_db(conn):
                 print(f"⚠️ Error creando tabla SQLite: {e}")
 
         _migrar_fechas_mantenimiento(cursor, is_postgresql=False)
+        _migrar_fecha_necesaria_compras(cursor, is_postgresql=False)
 
         cursor.execute("SELECT COUNT(*) FROM mecanicos")
         if cursor.fetchone()[0] == 0:

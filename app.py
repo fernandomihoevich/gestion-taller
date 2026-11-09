@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from fpdf import FPDF, FPDFException
 import os
@@ -222,6 +222,51 @@ st.markdown("""
 
     .agenda-day-heading.agenda-today {
         color: #ff9a68;
+    }
+
+    .compras-title {
+        font-size: 1.45rem;
+        line-height: 1.2;
+        margin: 0 0 0.45rem;
+    }
+
+    .compras-section-title {
+        font-size: 1.05rem;
+        line-height: 1.2;
+        margin: 0.35rem 0;
+    }
+
+    .st-key-compras-pendientes [data-testid="stVerticalBlock"] {
+        gap: 0.35rem;
+    }
+
+    .st-key-compras-pendientes [data-testid="stVerticalBlockBorderWrapper"] {
+        padding: 0.35rem 0.55rem;
+    }
+
+    .st-key-compras-encabezado {
+        display: block;
+    }
+
+    @media (max-width: 700px) {
+        .st-key-compras-pendientes [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0.2rem;
+        }
+
+        .st-key-compras-pendientes [data-testid="stColumn"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+
+        .st-key-compras-encabezado {
+            display: none !important;
+        }
+
+        .st-key-compras-pendientes .stButton button {
+            min-height: 2.75rem;
+        }
     }
 
     .agenda-day-count {
@@ -1024,6 +1069,106 @@ def _fecha_agenda(valor):
     return None
 
 
+def _cargar_compras_pendientes(conn, hoy=None):
+    hoy = hoy or datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+    df_compras = pd.read_sql_query(
+        "SELECT id, rubro, descripcion, detalle, cantidad, fecha_necesaria "
+        "FROM lista_compras WHERE estado = 'Pendiente'",
+        conn,
+    )
+    compras = []
+    for fila in df_compras.to_dict("records"):
+        fecha_necesaria = _fecha_agenda(fila["fecha_necesaria"])
+        dias_atraso = (hoy - fecha_necesaria).days if fecha_necesaria and fecha_necesaria < hoy else 0
+        compras.append(
+            {
+                **fila,
+                "fecha_necesaria_date": fecha_necesaria,
+                "dias_atraso": dias_atraso,
+            }
+        )
+
+    compras.sort(
+        key=lambda compra: (
+            2
+            if compra["fecha_necesaria_date"] is None
+            else 0
+            if compra["fecha_necesaria_date"] < hoy
+            else 1,
+            compra["fecha_necesaria_date"] or date.max,
+            str(compra["rubro"]).casefold(),
+            int(compra["id"]),
+        )
+    )
+    return compras
+
+
+def _compras_vencidas(compras, hoy=None):
+    hoy = hoy or datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+    return [
+        compra
+        for compra in compras
+        if compra["fecha_necesaria_date"] is not None
+        and compra["fecha_necesaria_date"] < hoy
+    ]
+
+
+def _mostrar_aviso_compras_vencidas(compras, incluir_boton=False):
+    if not compras:
+        return
+
+    st.warning(f"⚠️ Hay {len(compras)} compras vencidas.")
+    for compra in compras:
+        fecha_limite = compra["fecha_necesaria_date"].strftime("%d/%m/%Y")
+        st.markdown(
+            f"- **{compra['rubro']} · {compra['descripcion']}** — "
+            f"cantidad: {compra['cantidad']} · límite: {fecha_limite} · "
+            f"atraso: {compra['dias_atraso']} "
+            f"{'día' if compra['dias_atraso'] == 1 else 'días'}"
+        )
+    if incluir_boton:
+        st.button(
+            "🛒 Abrir Lista de Compras",
+            key="abrir_lista_compras_vencidas",
+            on_click=cambiar_pagina,
+            args=("🛒 Lista de Compras",),
+        )
+
+
+def _guardar_fecha_necesaria_compra(compra_id, widget_key):
+    fecha = st.session_state.get(widget_key)
+    if isinstance(fecha, datetime):
+        fecha = fecha.date()
+    if fecha is not None and not isinstance(fecha, date):
+        st.session_state[f"error_fecha_necesaria_{compra_id}"] = (
+            "La fecha seleccionada no es válida."
+        )
+        return
+
+    conn = conectar_db()
+    try:
+        actualizacion = conn.execute(
+            "UPDATE lista_compras SET fecha_necesaria = ? "
+            "WHERE id = ? AND estado = 'Pendiente'",
+            (fecha.isoformat() if fecha else None, compra_id),
+        )
+        if actualizacion.rowcount != 1:
+            st.session_state[f"error_fecha_necesaria_{compra_id}"] = (
+                "No se pudo guardar la fecha porque la compra ya no está pendiente."
+            )
+            return
+        conn.commit()
+        persistir_y_sync()
+        st.session_state[f"mensaje_fecha_necesaria_{compra_id}"] = (
+            "Fecha guardada."
+            if fecha
+            else "Compra guardada sin fecha."
+        )
+        st.session_state.pop(f"error_fecha_necesaria_{compra_id}", None)
+    finally:
+        conn.close()
+
+
 def _desplazamiento_semana_por_defecto(hoy):
     return 1 if hoy.weekday() >= 5 else 0
 
@@ -1697,13 +1842,18 @@ def colorear_estados(val):
 # ==========================================
 if menu_elegido == "🏠 Inicio semanal":
     st.markdown("<h2 class='agenda-title'>🏠 Agenda semanal del taller</h2>", unsafe_allow_html=True)
+    hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
     conn = conectar_db()
     try:
         trabajos_agenda, fechas_invalidas = _cargar_trabajos_agenda(conn)
+        compras_pendientes = _cargar_compras_pendientes(conn, hoy)
     finally:
         conn.close()
 
-    hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+    _mostrar_aviso_compras_vencidas(
+        _compras_vencidas(compras_pendientes, hoy),
+        incluir_boton=True,
+    )
     if st.session_state.get("agenda_semana_fecha_referencia") != hoy:
         st.session_state.agenda_semana_offset = _desplazamiento_semana_por_defecto(hoy)
         st.session_state.agenda_semana_fecha_referencia = hoy
@@ -2683,13 +2833,22 @@ elif menu_elegido == "🗂️ Archivo de PDFs":
 # 7. PANTALLA: LISTA DE COMPRAS
 # ==========================================
 elif menu_elegido == "🛒 Lista de Compras":
-    st.title("🛒 Gestión de Insumos y Repuestos")
+    st.markdown(
+        "<h2 class='compras-title'>🛒 Gestión de Insumos y Repuestos</h2>",
+        unsafe_allow_html=True,
+    )
     conn = conectar_db()
-    
+    hoy = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).date()
+    compras_pendientes = _cargar_compras_pendientes(conn, hoy)
+    _mostrar_aviso_compras_vencidas(_compras_vencidas(compras_pendientes, hoy))
+
     tab_pendientes, tab_cargar, tab_rubros = st.tabs(["📋 Lista de Pendientes", "📝 Cargar Necesidad", "⚙️ Configurar Rubros"])
     
     with tab_cargar:
-        st.subheader("Cargar nuevo ítem a comprar")
+        st.markdown(
+            "<h3 class='compras-section-title'>Cargar nuevo ítem a comprar</h3>",
+            unsafe_allow_html=True,
+        )
         df_rubros_carga = pd.read_sql_query("SELECT nombre FROM maestro_rubros_compras ORDER BY nombre", conn)
         
         if df_rubros_carga.empty:
@@ -2700,40 +2859,133 @@ elif menu_elegido == "🛒 Lista de Compras":
                 desc_input = st.text_input("Descripción (Ej: Filtro de aceite, Electrodos, Lija):")
                 det_input = st.text_area("Detalle Técnico / Código / Marca preferida (Opcional):")
                 cant_input = st.text_input("Cantidad necesaria (Ej: 2 unidades, 5 litros):")
+                fecha_necesaria_input = st.date_input(
+                    "Fecha necesaria:",
+                    value=None,
+                    format="DD/MM/YYYY",
+                )
                 
                 if st.form_submit_button("➕ Agregar a la lista"):
-                    if desc_input.strip() and cant_input.strip():
+                    if desc_input.strip() and cant_input.strip() and fecha_necesaria_input:
                         fecha_hoy = datetime.now().strftime("%d/%m/%Y")
-                        conn.execute("INSERT INTO lista_compras (rubro, descripcion, detalle, cantidad, fecha_carga, estado) VALUES (?, ?, ?, ?, ?, ?)", 
-                                     (rubro_sel, desc_input.strip(), det_input.strip(), cant_input.strip(), fecha_hoy, "Pendiente"))
+                        conn.execute(
+                            "INSERT INTO lista_compras "
+                            "(rubro, descripcion, detalle, cantidad, fecha_carga, estado, fecha_necesaria) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                rubro_sel,
+                                desc_input.strip(),
+                                det_input.strip(),
+                                cant_input.strip(),
+                                fecha_hoy,
+                                "Pendiente",
+                                fecha_necesaria_input.isoformat(),
+                            ),
+                        )
                         conn.commit()
+                        persistir_y_sync()
                         st.success("¡Agregado exitosamente a la lista de pendientes!")
-                        pass
                     else:
-                        st.error("⚠️ Los campos 'Descripción' y 'Cantidad' son obligatorios.")
+                        st.error(
+                            "⚠️ Completá la descripción, la cantidad y la fecha necesaria."
+                        )
 
     with tab_pendientes:
-        st.subheader("Pendientes de Compra por Rubro")
-        df_pendientes = pd.read_sql_query("SELECT * FROM lista_compras WHERE estado = 'Pendiente' ORDER BY rubro", conn)
-        
-        if df_pendientes.empty:
-            st.success("🎉 ¡No hay compras pendientes! El taller está completamente abastecido.")
-        else:
-            rubros_activos = df_pendientes['rubro'].unique()
-            for rubro in rubros_activos:
-                st.markdown(f"### 📦 {rubro}")
-                df_filtrado = df_pendientes[df_pendientes['rubro'] == rubro]
-                
-                for _, fila in df_filtrado.iterrows():
-                    c1, c2, c3, c4 = st.columns([0.3, 0.4, 0.15, 0.15])
-                    c1.write(f"**{fila['descripcion']}**")
-                    c2.caption(fila['detalle'] if fila['detalle'] else "-")
-                    c3.write(f"Cant: **{fila['cantidad']}**")
-                    if c4.button("✅ Ya lo compré", key=f"btn_compra_{fila['id']}"):
-                        conn.execute("UPDATE lista_compras SET estado = 'Comprado' WHERE id = ?", (fila['id'],))
-                        conn.commit()
-                        pass
-                st.markdown("---")
+        with st.container(key="compras-pendientes"):
+            st.markdown(
+                "<h3 class='compras-section-title'>Pendientes de compra</h3>",
+                unsafe_allow_html=True,
+            )
+            if not compras_pendientes:
+                st.success("🎉 ¡No hay compras pendientes! El taller está completamente abastecido.")
+            else:
+                encabezados = st.container(key="compras-encabezado")
+                with encabezados:
+                    c_rubro, c_articulo, c_cantidad, c_fecha, c_accion = st.columns(
+                        [1.05, 2.4, 0.85, 1.8, 1.1],
+                        gap="small",
+                    )
+                    c_rubro.caption("Rubro")
+                    c_articulo.caption("Artículo / detalle")
+                    c_cantidad.caption("Cantidad")
+                    c_fecha.caption("Fecha necesaria")
+                    c_accion.caption("Acción")
+
+                grupo_actual = None
+                for compra in compras_pendientes:
+                    fecha_necesaria = compra["fecha_necesaria_date"]
+                    grupo = (
+                        "Sin fecha"
+                        if fecha_necesaria is None
+                        else "Vencidas"
+                        if fecha_necesaria < hoy
+                        else "Próximas"
+                    )
+                    if grupo != grupo_actual:
+                        st.markdown(f"**{grupo}**")
+                        grupo_actual = grupo
+
+                    with st.container(border=True):
+                        c_rubro, c_articulo, c_cantidad, c_fecha, c_accion = st.columns(
+                            [1.05, 2.4, 0.85, 1.8, 1.1],
+                            gap="small",
+                        )
+                        c_rubro.markdown(f"**{compra['rubro']}**")
+                        c_articulo.markdown(f"**{compra['descripcion']}**")
+                        if compra["detalle"]:
+                            c_articulo.caption(compra["detalle"])
+                        c_cantidad.caption("Cantidad")
+                        c_cantidad.markdown(f"**{compra['cantidad']}**")
+
+                        widget_key = f"fecha_necesaria_compra_{compra['id']}"
+                        if widget_key not in st.session_state:
+                            st.session_state[widget_key] = fecha_necesaria
+                        c_fecha.date_input(
+                            "Fecha necesaria",
+                            format="DD/MM/YYYY",
+                            key=widget_key,
+                            on_change=_guardar_fecha_necesaria_compra,
+                            args=(compra["id"], widget_key),
+                        )
+                        if fecha_necesaria is None:
+                            c_fecha.caption("Sin fecha")
+                        elif fecha_necesaria < hoy:
+                            dias_atraso = compra["dias_atraso"]
+                            c_fecha.error(
+                                f"Vencida · {dias_atraso} "
+                                f"{'día' if dias_atraso == 1 else 'días'} de atraso"
+                            )
+
+                        mensaje_fecha = st.session_state.pop(
+                            f"mensaje_fecha_necesaria_{compra['id']}",
+                            None,
+                        )
+                        if mensaje_fecha:
+                            c_fecha.caption(mensaje_fecha)
+                        error_fecha = st.session_state.pop(
+                            f"error_fecha_necesaria_{compra['id']}",
+                            None,
+                        )
+                        if error_fecha:
+                            c_fecha.error(error_fecha)
+
+                        if c_accion.button(
+                            "✅ Ya lo compré",
+                            key=f"btn_compra_{compra['id']}",
+                            use_container_width=True,
+                        ):
+                            actualizacion = conn.execute(
+                                "UPDATE lista_compras SET estado = 'Comprado' "
+                                "WHERE id = ? AND estado = 'Pendiente'",
+                                (compra["id"],),
+                            )
+                            if actualizacion.rowcount != 1:
+                                st.error(
+                                    "No se pudo marcar como comprada porque ya no está pendiente."
+                                )
+                            else:
+                                conn.commit()
+                                persistir_y_sync()
 
     with tab_rubros:
         st.subheader("Administrar Categorías (Rubros)")
