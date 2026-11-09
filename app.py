@@ -1079,7 +1079,7 @@ def _guardar_accesos_usuario(user_id, activo, permisos):
             "DELETE FROM public.app_user_permissions WHERE user_id = ?",
             (user_id,),
         )
-        conn.executemany(
+        conn.cursor().executemany(
             "INSERT INTO public.app_user_permissions "
             "(user_id, section_key, enabled) VALUES (?, ?, ?)",
             [
@@ -1181,11 +1181,16 @@ def _diagnostico_error_perfil(exc):
     causa = exc.__cause__ or exc
     detalles = [type(causa).__name__]
     if isinstance(causa, PsycopgError):
-        if causa.pgcode:
-            detalles.append(f"SQLSTATE {causa.pgcode}")
-        restriccion = getattr(getattr(causa, "diag", None), "constraint_name", None)
+        codigo_sql = getattr(causa, "pgcode", None)
+        if codigo_sql:
+            detalles.append(f"SQLSTATE {codigo_sql}")
+        diagnostico = getattr(causa, "diag", None)
+        restriccion = getattr(diagnostico, "constraint_name", None)
         if restriccion:
             detalles.append(f"restricción {restriccion}")
+    mensaje = str(causa).strip()
+    if mensaje:
+        detalles.append(mensaje[:500])
     return "; ".join(detalles)
 
 
